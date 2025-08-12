@@ -9,12 +9,5 @@
   "routes": [
     { "src": "/(.*)", "dest": "api/index.py" }
   ],
-  "installCommand": "pip install -r capstone/requirements-vercel.txt",
-  "functions": {
-    "api/index.py": {
-      "runtime": "python3.11",
-      "memory": 1024,
-      "maxDuration": 10
-    }
-  }
+  "installCommand": "pip install -r capstone/requirements-vercel.txt"
 } 
