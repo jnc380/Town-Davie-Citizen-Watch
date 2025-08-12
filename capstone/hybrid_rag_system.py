@@ -19,8 +19,8 @@ import re
 import time
 import uuid
 from collections import deque, defaultdict
-from telemetry import init_if_configured as telemetry_init, record_event, upsert_session
-from telemetry import get_status as telemetry_status
+from capstone.telemetry import init_if_configured as telemetry_init, record_event, upsert_session
+from capstone.telemetry import get_status as telemetry_status
 import hashlib
 
 # OpenAI imports
@@ -2516,7 +2516,7 @@ async def telemetry_status_endpoint():
         if resp["postgres_connected"]:
             try:
                 # Use direct connection to avoid importing heavy libs
-                from telemetry import _DB_CONN  # type: ignore
+                from capstone.telemetry import _DB_CONN  # type: ignore
                 with _DB_CONN.cursor() as cur:  # type: ignore
                     cur.execute("SELECT COUNT(*) FROM sessions")
                     s_count = cur.fetchone()[0]
