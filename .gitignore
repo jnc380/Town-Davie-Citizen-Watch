@@ -5,6 +5,7 @@
 !/.gitignore
 !/README.md
 !/vercel.json
+!/requirements.txt
 
 # Allow deployment entry
 !/api/
