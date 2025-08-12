@@ -4,6 +4,7 @@
 # Allow git metadata and this file
 !/.gitignore
 !/README.md
+!/vercel.json
 
 # Allow deployment entry
 !/api/
