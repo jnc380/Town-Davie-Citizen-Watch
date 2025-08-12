@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime
 import asyncio
 from pathlib import Path
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
+# import numpy as np  # Avoid heavy dep on Vercel; use standard lists where possible
+# from sklearn.feature_extraction.text import TfidfVectorizer  # Removed; guarded import later if needed
 import re
 import time
 import uuid
@@ -80,15 +80,6 @@ logger = logging.getLogger(__name__)
 LIGHT_DEPLOYMENT = os.getenv("LIGHT_DEPLOYMENT", "false").lower() == "true"
 # Enable BM25 rerank on Vercel (pure-Python)
 BM25_RERANK = os.getenv("BM25_RERANK", "false").lower() == "true"
-
-# Optional sklearn import guarded for Vercel free tier
-try:
-    if not LIGHT_DEPLOYMENT:
-        from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore
-    else:
-        TfidfVectorizer = None  # type: ignore
-except Exception:
-    TfidfVectorizer = None  # type: ignore
 
 # Optional pure-Python BM25
 try:
