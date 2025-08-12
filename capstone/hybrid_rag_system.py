@@ -23,26 +23,20 @@ from capstone.telemetry import init_if_configured as telemetry_init, record_even
 from capstone.telemetry import get_status as telemetry_status
 import hashlib
 
-# Define flags early for conditional imports
-LIGHT_DEPLOYMENT = os.getenv("LIGHT_DEPLOYMENT", "false").lower() == "true"
+# Serverless-safe mode: always skip local Milvus/Neo4j on Vercel
+LIGHT_DEPLOYMENT = True
 BM25_RERANK = os.getenv("BM25_RERANK", "false").lower() == "true"
 
 # OpenAI imports
 from openai import AsyncOpenAI
 
-# Milvus/Minerva imports
-if not LIGHT_DEPLOYMENT:
-    from pymilvus import connections, Collection, utility  # type: ignore
-else:
-    connections = None  # type: ignore
-    Collection = None  # type: ignore
-    utility = None  # type: ignore
+# Milvus/Minerva imports (removed for Vercel serverless)
+connections = None  # type: ignore
+Collection = None  # type: ignore
+utility = None  # type: ignore
 
-# Neo4j imports
-if not LIGHT_DEPLOYMENT:
-    from neo4j import GraphDatabase  # type: ignore
-else:
-    GraphDatabase = None  # type: ignore
+# Neo4j imports (removed for Vercel serverless)
+GraphDatabase = None  # type: ignore
 
 # HTTP client for remote services (used in LIGHT_DEPLOYMENT)
 try:
@@ -177,9 +171,10 @@ class HybridRAGSystem:
         if LIGHT_DEPLOYMENT:
             logger.info("ℹ️ LIGHT_DEPLOYMENT enabled: skipping TF-IDF sparse vectorizer initialization")
         
-        # Initialize connections
-        self._setup_milvus()
-        self._setup_neo4j()
+        # Initialize connections (removed for Vercel serverless)
+        logger.info("ℹ️ Serverless-safe: skipping Milvus/Neo4j connections")
+        self.milvus_collection = None
+        self.neo4j_driver = None
         
         logger.info("✅ Hybrid RAG system initialized successfully")
  
@@ -274,115 +269,24 @@ class HybridRAGSystem:
         }
 
     def fit_sparse_vectorizer(self, corpus_texts: List[str]) -> None:
-        if LIGHT_DEPLOYMENT or TfidfVectorizer is None:
-            self.sparse_vectorizer = None
-            return
-            vectorizer = TfidfVectorizer(max_features=self.sparse_vector_dim, ngram_range=(1, 2), lowercase=True)
-        try:
-            vectorizer.fit(corpus_texts)
-            self.sparse_vectorizer = vectorizer
-        except Exception:
-            self.sparse_vectorizer = None
+        # Sparse vectorizer removed for Vercel serverless
+        self.sparse_vectorizer = None
+        return
+
     
     def _setup_milvus(self):
-        """Setup Milvus/Minerva connection and collection"""
-        try:
-            # Connect to Milvus
-            connections.connect(
-                alias="default",
-                uri=self.milvus_uri,
-                token=self.milvus_token
-            )
-            logger.info(f"✅ Connected to Milvus at {self.milvus_uri}")
-            
-            # Create collection if it doesn't exist
-            if not utility.has_collection(self.collection_name):
-                self._create_milvus_collection()
-            else:
-                self.milvus_collection = Collection(self.collection_name)
-                self.milvus_collection.load()
-            
-            logger.info(f"✅ Milvus collection '{self.collection_name}' ready")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to setup Milvus: {e}")
-            raise
+        """Milvus setup removed on Vercel serverless."""
+        self.milvus_collection = None
+        return
     
     def _create_milvus_collection(self):
-        """Create the Milvus collection with proper schema"""
-        from pymilvus import CollectionSchema, FieldSchema, DataType
-        
-        # Define collection schema
-        fields = [
-            FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-            FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
-            FieldSchema(name="chunk_id", dtype=DataType.VARCHAR, max_length=100),
-            FieldSchema(name="meeting_id", dtype=DataType.VARCHAR, max_length=100),
-            FieldSchema(name="meeting_type", dtype=DataType.VARCHAR, max_length=50),
-            FieldSchema(name="meeting_date", dtype=DataType.VARCHAR, max_length=32),
-            FieldSchema(name="chunk_type", dtype=DataType.VARCHAR, max_length=50),
-            FieldSchema(name="start_time", dtype=DataType.FLOAT),
-            FieldSchema(name="duration", dtype=DataType.FLOAT),
-            FieldSchema(name="metadata", dtype=DataType.JSON),
-            FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=1536),
-            FieldSchema(name="sparse_embedding", dtype=DataType.FLOAT_VECTOR, dim=self.sparse_vector_dim)
-        ]
-        
-        schema = CollectionSchema(fields=fields, description="Capstone hybrid RAG collection")
-        
-        # Create collection
-        self.milvus_collection = Collection(
-            name=self.collection_name,
-            schema=schema,
-            using='default'
-        )
-        
-        # Create indexes for vector search
-        dense_index_params = {
-            "metric_type": "COSINE",
-            "index_type": "HNSW",
-            "params": {"M": 32, "efConstruction": 200}
-        }
-        self.milvus_collection.create_index(field_name="embedding", index_params=dense_index_params)
-        
-        sparse_index_params = {
-            "metric_type": "COSINE",
-            "index_type": "IVF_FLAT",
-            "params": {"nlist": 128}
-        }
-        self.milvus_collection.create_index(field_name="sparse_embedding", index_params=sparse_index_params)
-        
-        logger.info(f"✅ Created Milvus collection '{self.collection_name}' with dense and sparse indexes")
+        """Milvus collection creation removed on Vercel serverless."""
+        return
     
     def _setup_neo4j(self):
-        """Setup Neo4j connection and indexes"""
-        try:
-            self.neo4j_driver = GraphDatabase.driver(
-                self.neo4j_uri,
-                auth=(self.neo4j_username, self.neo4j_password)
-            )
-            with self.neo4j_driver.session() as session:
-                result = session.run("RETURN 1 as test")
-                _ = result.single()["test"]
-                logger.info("✅ Connected to Neo4j")
-                
-                # Create constraints/indexes as needed
-                constraints = [
-                    "CREATE CONSTRAINT IF NOT EXISTS FOR (m:Meeting) REQUIRE m.id IS UNIQUE",
-                    "CREATE CONSTRAINT IF NOT EXISTS FOR (a:AgendaItem) REQUIRE a.id IS UNIQUE",
-                ]
-                for constraint in constraints:
-                    session.run(constraint)
- 
-                # Try to create uniqueness constraints; if duplicates exist, fall back to non-unique indexes
-                self._ensure_unique_constraint(session, "Meeting", "meeting_id")
-                self._ensure_unique_constraint(session, "AgendaItem", "item_id")
- 
-                logger.info("✅ Neo4j constraints ensured")
-        except Exception as e:
-            logger.error(f"❌ Failed to setup Neo4j: {e}")
-            # Continue without Neo4j to allow the API to start
-            self.neo4j_driver = None
+        """Neo4j setup removed on Vercel serverless."""
+        self.neo4j_driver = None
+        return
      
     def _ensure_unique_constraint(self, session, label: str, property_name: str) -> None:
         """Ensure a unique constraint exists for the given label.property.
