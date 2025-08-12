@@ -27,10 +27,24 @@ import hashlib
 from openai import AsyncOpenAI
 
 # Milvus/Minerva imports
-from pymilvus import connections, Collection, utility
+if not LIGHT_DEPLOYMENT:
+    from pymilvus import connections, Collection, utility  # type: ignore
+else:
+    connections = None  # type: ignore
+    Collection = None  # type: ignore
+    utility = None  # type: ignore
 
 # Neo4j imports
-from neo4j import GraphDatabase
+if not LIGHT_DEPLOYMENT:
+    from neo4j import GraphDatabase  # type: ignore
+else:
+    GraphDatabase = None  # type: ignore
+
+# HTTP client for remote services (used in LIGHT_DEPLOYMENT)
+try:
+    import httpx  # type: ignore
+except Exception:
+    httpx = None  # type: ignore
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException, Request
@@ -261,7 +275,7 @@ class HybridRAGSystem:
         if LIGHT_DEPLOYMENT or TfidfVectorizer is None:
             self.sparse_vectorizer = None
             return
-        vectorizer = TfidfVectorizer(max_features=self.sparse_vector_dim, ngram_range=(1, 2), lowercase=True)
+            vectorizer = TfidfVectorizer(max_features=self.sparse_vector_dim, ngram_range=(1, 2), lowercase=True)
         try:
             vectorizer.fit(corpus_texts)
             self.sparse_vectorizer = vectorizer
@@ -884,6 +898,41 @@ class HybridRAGSystem:
                 filters.append(f"meeting_date == '{dn}'")
             # Note: for month/year or year-only we skip expr and rely on fusion + rerank
             expr = " and ".join(filters) if filters else None
+
+            # If LIGHT_DEPLOYMENT, use remote services and skip local heavy clients
+            if LIGHT_DEPLOYMENT:
+                # Get query embedding once (still needed for answer synthesis but remote may not need it)
+                try:
+                    query_embedding = await asyncio.wait_for(self.get_embedding(query), timeout=15)
+                except Exception:
+                    query_embedding = await self.get_embedding(query)
+
+                # Remote calls
+                vector_results = await _remote_vector_search(query, top_k * 2)
+                graph_results = await _remote_graph_search(query, top_k)
+
+                # Fuse (treat remote vector as dense; no sparse in light mode)
+                fused_results = self._fuse_dense_sparse(vector_results, [], top_k * 2, alpha=alpha)
+
+                # Build combined outputs
+                combined = await self._synthesize_answer(query, fused_results, graph_results)
+                return {
+                    "query": query,
+                    "vector_results": vector_results,
+                    "graph_results": graph_results,
+                    "combined_results": combined,
+                    "search_metadata": {
+                        "dense_count": len(vector_results),
+                        "sparse_count": 0,
+                        "vector_count": len(vector_results),
+                        "graph_count": len(graph_results),
+                        "alpha": alpha,
+                        "filters": expr or "",
+                        "total_results": len(vector_results) + len(graph_results),
+                    },
+                }
+
+            # Normal (non-light) path continues below
 
             # Get query embedding with timeout
             try:
@@ -2452,6 +2501,34 @@ async def telemetry_status_endpoint():
         return resp
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Remote service endpoints
+VECTOR_API_URL = os.getenv("VECTOR_API_URL")
+GRAPH_API_URL = os.getenv("GRAPH_API_URL")
+
+async def _remote_vector_search(query: str, top_k: int) -> List[Dict[str, Any]]:
+    if httpx is None or not VECTOR_API_URL:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(VECTOR_API_URL, json={"query": query, "top_k": top_k})
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("results", [])
+    except Exception:
+        return []
+
+async def _remote_graph_search(query: str, top_k: int) -> List[Dict[str, Any]]:
+    if httpx is None or not GRAPH_API_URL:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(GRAPH_API_URL, json={"query": query, "top_k": top_k})
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("results", [])
+    except Exception:
+        return []
 
 if __name__ == "__main__":
     import uvicorn
