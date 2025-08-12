@@ -2206,11 +2206,18 @@ except Exception as e:
 
 try:
     templates = None
-    if os.path.isdir("capstone/templates"):
-        templates = Jinja2Templates(directory="capstone/templates")
-    elif os.path.isdir("templates"):
-        templates = Jinja2Templates(directory="templates")
-    else:
+    # Probe multiple likely template locations
+    candidate_templates = [
+        "capstone/templates",
+        "templates",
+        "/var/task/capstone/templates",
+        "/var/task/templates",
+    ]
+    for tp in candidate_templates:
+        if os.path.isdir(tp):
+            templates = Jinja2Templates(directory=tp)
+            break
+    if templates is None:
         logger.warning("Templates directory not found; index route will return a basic response")
 except Exception as e:
     templates = None
@@ -2243,7 +2250,42 @@ except Exception as e:
 async def index(request: Request):
     """Serve the main application page"""
     if templates is None:
-        return HTMLResponse("Service is running. No templates directory found.")
+        # Embedded minimal HTML fallback so the UI still renders on Vercel
+        html = """
+        <!DOCTYPE html>
+        <html><head><meta charset=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>
+        <title>Town of Davie Citizen Watch</title>
+        <link href=\"https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css\" rel=\"stylesheet\">
+        </head>
+        <body class=\"bg-gray-50\">
+          <div class=\"max-w-3xl mx-auto mt-10 p-6 bg-white shadow rounded\">
+            <h1 class=\"text-2xl font-bold mb-2\">Town of Davie Citizen Watch</h1>
+            <p class=\"text-gray-600 mb-6\">Service is running. Default UI loaded because no templates directory was found.</p>
+            <form id=\"chat-form\" class=\"flex space-x-2\" onsubmit=\"event.preventDefault(); sendMessage();\">
+              <input id=\"message-input\" class=\"flex-1 border rounded px-3 py-2\" placeholder=\"Ask a question...\"/>
+              <button class=\"bg-blue-600 text-white px-4 py-2 rounded\">Send</button>
+            </form>
+            <div id=\"chat-messages\" class=\"mt-4 space-y-3\"></div>
+          </div>
+          <script>
+            async function sendMessage(){
+              const input = document.getElementById('message-input');
+              const msg = (input.value||'').trim();
+              if(!msg) return;
+              input.value='';
+              const box = document.getElementById('chat-messages');
+              const user = document.createElement('div'); user.className='p-3 bg-green-50 rounded'; user.textContent=msg; box.appendChild(user);
+              try{
+                const r = await fetch('/api/search', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({query: msg, top_k: 10})});
+                const data = await r.json();
+                const ai = document.createElement('div'); ai.className='p-3 bg-blue-50 rounded'; ai.textContent=(data && data.answer) || 'No answer'; box.appendChild(ai);
+              }catch(e){ const er=document.createElement('div'); er.className='p-3 bg-red-50 rounded'; er.textContent='Error contacting API'; box.appendChild(er); }
+              box.scrollTop = box.scrollHeight;
+            }
+          </script>
+        </body></html>
+        """
+        return HTMLResponse(content=html, status_code=200)
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.post("/api/search", response_model=SearchResponse)
