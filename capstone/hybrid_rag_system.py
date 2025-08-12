@@ -2158,6 +2158,33 @@ class HybridRAGSystem:
         except Exception:
             return candidates[:top_k]
 
+    async def _synthesize_answer(self, query: str, candidates: List[Dict[str, Any]], graph_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Produce a combined result list and attach a synthesized answer summary to the first element.
+        Returns the candidates list (possibly truncated to top_k elsewhere) and relies on the caller to build
+        the final response. Lightweight for Vercel.
+        """
+        # Ensure consistent structure
+        combined: List[Dict[str, Any]] = []
+        for c in (candidates or [])[:10]:
+            combined.append({
+                "title": c.get("title") or c.get("chunk_id") or "Result",
+                "content": c.get("content") or c.get("text") or "",
+                "meeting_id": c.get("meeting_id"),
+                "meeting_date": c.get("meeting_date"),
+                "type": c.get("type") or c.get("chunk_type") or "document",
+                "url": c.get("url") or c.get("agenda_url"),
+                "score": c.get("score") or c.get("dense_score") or c.get("sparse_score"),
+            })
+        # Append graph references lightly
+        for g in (graph_results or [])[:5]:
+            combined.append({
+                "title": g.get("title") or g.get("entity") or "Graph Entity",
+                "content": g.get("summary") or g.get("description") or "",
+                "type": "graph",
+                "score": g.get("score"),
+            })
+        return combined
+
 # Pydantic models for API
 class SearchRequest(BaseModel):
     query: str = Field(..., description="Search query", min_length=1, max_length=1000)
@@ -2348,6 +2375,21 @@ async def search(req: Request, request: SearchRequest):
         vector_sources = combined.get("vector_sources") or results.get("vector_results") or []
         graph_sources = combined.get("graph_sources") or results.get("graph_results") or []
         total_sources = combined.get("total_sources") or (len(vector_sources) + len(graph_sources))
+
+        # If combined is a list (from lightweight _synthesize_answer), build answer and citations
+        if isinstance(combined, list):
+            top_texts = [c.get("content") for c in combined if c.get("content")] 
+            answer_text = "\n\n".join(top_texts[:2]) or "I couldn't find relevant information."
+            citations = []
+            for c in combined[:5]:
+                citations.append({
+                    "title": c.get("title"),
+                    "url": c.get("url"),
+                    "meeting_id": c.get("meeting_id"),
+                    "meeting_date": c.get("meeting_date"),
+                    "type": c.get("type", "document"),
+                })
+            combined = {"answer": answer_text, "source_citations": citations}
 
         # Final safety: unwrap accidental JSON-in-string in answer
         try:
