@@ -23,6 +23,10 @@ from capstone.telemetry import init_if_configured as telemetry_init, record_even
 from capstone.telemetry import get_status as telemetry_status
 import hashlib
 
+# Define flags early for conditional imports
+LIGHT_DEPLOYMENT = os.getenv("LIGHT_DEPLOYMENT", "false").lower() == "true"
+BM25_RERANK = os.getenv("BM25_RERANK", "false").lower() == "true"
+
 # OpenAI imports
 from openai import AsyncOpenAI
 
@@ -76,11 +80,7 @@ load_dotenv(dotenv_path=capstone_env, override=False)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Lightweight deployment flag to disable heavy features on serverless
-LIGHT_DEPLOYMENT = os.getenv("LIGHT_DEPLOYMENT", "false").lower() == "true"
-# Enable BM25 rerank on Vercel (pure-Python)
-BM25_RERANK = os.getenv("BM25_RERANK", "false").lower() == "true"
-
+# Flags defined above for early conditional imports
 # Optional pure-Python BM25
 try:
     from rank_bm25 import BM25Okapi  # type: ignore
