@@ -75,6 +75,8 @@ logger = logging.getLogger(__name__)
 
 # Lightweight deployment flag to disable heavy features on serverless
 LIGHT_DEPLOYMENT = os.getenv("LIGHT_DEPLOYMENT", "false").lower() == "true"
+# Enable BM25 rerank on Vercel (pure-Python)
+BM25_RERANK = os.getenv("BM25_RERANK", "false").lower() == "true"
 
 # Optional sklearn import guarded for Vercel free tier
 try:
@@ -84,6 +86,12 @@ try:
         TfidfVectorizer = None  # type: ignore
 except Exception:
     TfidfVectorizer = None  # type: ignore
+
+# Optional pure-Python BM25
+try:
+    from rank_bm25 import BM25Okapi  # type: ignore
+except Exception:
+    BM25Okapi = None  # type: ignore
 
 @dataclass
 class MeetingData:
@@ -913,6 +921,8 @@ class HybridRAGSystem:
 
                 # Fuse (treat remote vector as dense; no sparse in light mode)
                 fused_results = self._fuse_dense_sparse(vector_results, [], top_k * 2, alpha=alpha)
+                # BM25 rerank in light mode
+                fused_results = self._bm25_rerank(query, fused_results, top_k)
 
                 # Build combined outputs
                 combined = await self._synthesize_answer(query, fused_results, graph_results)
@@ -959,7 +969,10 @@ class HybridRAGSystem:
                     reranked = fused_results[:top_k]
                     graph_results = await graph_task
             else:
-                reranked, graph_results = fused_results[:top_k], await graph_task
+                # If GPT rerank is off, optionally rerank with BM25
+                bm25_candidates = fused_results
+                reranked = self._bm25_rerank(query, bm25_candidates, top_k)
+                graph_results = await graph_task
 
             # If nothing retrieved, return a scoped no-data message to avoid hallucinations
             if not reranked and not graph_results:
@@ -2226,6 +2239,26 @@ class HybridRAGSystem:
         # collapse excessive blank lines
         t = re.sub(r"\n{3,}", "\n\n", t)
         return t.strip()
+
+    def _simple_tokenize(self, text: str) -> List[str]:
+        t = (text or "").lower()
+        t = re.sub(r"[^a-z0-9\s]", " ", t)
+        return [tok for tok in t.split() if tok]
+
+    def _bm25_rerank(self, query: str, candidates: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+        if not BM25_RERANK or BM25Okapi is None or not candidates:
+            return candidates[:top_k]
+        try:
+            corpus_tokens = [self._simple_tokenize(c.get("content") or c.get("text") or "") for c in candidates]
+            bm25 = BM25Okapi(corpus_tokens)
+            query_tokens = self._simple_tokenize(query)
+            scores = bm25.get_scores(query_tokens)
+            for cand, s in zip(candidates, scores):
+                cand["bm25_score"] = float(s)
+            candidates.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
+            return candidates[:top_k]
+        except Exception:
+            return candidates[:top_k]
 
 # Pydantic models for API
 class SearchRequest(BaseModel):
