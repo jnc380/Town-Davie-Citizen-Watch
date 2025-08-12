@@ -1,0 +1,1 @@
+from capstone.hybrid_rag_system import app  # FastAPI app entry for Vercel 

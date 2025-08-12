@@ -1,0 +1,55 @@
+# Ignore everything by default
+*
+
+# Allow git metadata and this file
+!/.gitignore
+!/README.md
+
+# Allow deployment entry
+!/api/
+!/api/index.py
+
+# Allow selected capstone files
+!/capstone/
+!/capstone/telemetry.py
+!/capstone/hybrid_rag_system.py
+!/capstone/vercel.json
+!/capstone/requirements-vercel.txt
+!/capstone/youtube_url_mapper.py
+!/capstone/templates/
+!/capstone/templates/index.html
+!/capstone/agenda_processes/
+!/capstone/agenda_processes/agenda_scraper.py
+!/capstone/youtube_processes/
+!/capstone/youtube_processes/youtube_hybrid_downloader.py
+
+# Explicitly ignore sensitive and heavy content even if dir is allowed
+/capstone/env.example
+/capstone/.env
+/.env
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/*.log
+**/.DS_Store
+
+# Ignore large/local assets and temp data
+/capstone/tmp/
+/capstone/downloads/
+/capstone/eval/
+/videos/
+**/*.mp4
+**/*.wav
+
+# Ignore virtual environments and local tooling
+.venv/
+venv/
+fastapi-vibe-coding/
+rag-llm-example/
+week_1/
+week_2/
+week_3/
+week_4/
+static/
+templates/ 
