@@ -59,8 +59,11 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.errors import RateLimitExceeded
 
 # Load environment variables
-from dotenv import load_dotenv
-from youtube_url_mapper import get_youtube_url, get_meeting_info
+try:
+    from dotenv import load_dotenv  # type: ignore
+except Exception:
+    def load_dotenv(*args, **kwargs):
+        return False
 # Try loading from current working directory first
 loaded = load_dotenv()
 # Then try repo root and capstone directory explicitly
@@ -2562,6 +2565,16 @@ async def _remote_graph_search(query: str, top_k: int) -> List[Dict[str, Any]]:
             return data.get("results", [])
     except Exception:
         return []
+
+# YouTube URL helper (safe import)
+try:
+    from capstone.youtube_url_mapper import get_youtube_url  # type: ignore
+except Exception:
+    try:
+        from youtube_url_mapper import get_youtube_url  # type: ignore
+    except Exception:
+        def get_youtube_url(meeting_id: str):
+            return None
 
 if __name__ == "__main__":
     import uvicorn
