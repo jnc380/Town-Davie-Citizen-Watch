@@ -2730,7 +2730,21 @@ async def index(request: Request):
                 const data = await r.json();
                 thinking.remove();
                 const ai = document.createElement('div'); ai.className='message bg-gray-50 rounded p-3 whitespace-pre-wrap'; ai.textContent=(data && data.answer) || 'No answer'; box.appendChild(ai);
-                renderSources(box, (data && data.source_citations)||[]);
+                const bullets = (data && data.answer_bullets) || [];
+                if (bullets.length){
+                  const wrap = document.createElement('div');
+                  wrap.className='mt-2 text-sm text-gray-700 bg-white border rounded p-3';
+                  wrap.innerHTML = '<div class="font-semibold mb-1">Why these sources?</div>' +
+                    bullets.map((b,i)=>{
+                      const tail = [b.meeting_id, b.meeting_date].filter(Boolean).join(' • ');
+                      const text = (b.text||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                      const url = b.url||'#';
+                      return `<div class="mb-1">${i+1}. <a class="text-blue-700 underline" href="${url}" target="_blank" rel="noopener">${text}</a> <span class="text-gray-500">${tail?('('+tail+')'):''}</span></div>`
+                    }).join('');
+                  box.appendChild(wrap);
+                } else {
+                  renderSources(box, (data && data.source_citations)||[]);
+                }
                 box.scrollTop = box.scrollHeight;
               }catch(e){ thinking.innerHTML='<span class="text-red-600">Error contacting API</span>'; }
             }
@@ -2828,7 +2842,46 @@ async def search(req: Request, request: SearchRequest):
                 # Fallback to brief snippet join
                 top_texts = [c.get("content") for c in combined if isinstance(c, dict) and c.get("content")]
                 answer_text = "\n\n".join(top_texts[:2]) or "I couldn't find relevant information."
-            combined = {"answer": answer_text, "source_citations": citations}
+            # Build answer_bullets mapping each citation to a short supporting excerpt
+            answer_bullets: List[Dict[str, Any]] = []
+            try:
+                # Simple map url->vector result
+                url_to_vec = {}
+                for vr in vector_results:
+                    u = vr.get("url")
+                    if u and u not in url_to_vec:
+                        url_to_vec[u] = vr
+                # Pick significant tokens from query to guide snippet selection
+                import re as _re
+                sig_toks = [t for t in _re.findall(r"[a-zA-Z0-9]+", (q or '').lower()) if len(t) > 3]
+                for cit in citations[:5]:
+                    u = cit.get("url")
+                    vr = url_to_vec.get(u)
+                    snippet = None
+                    if vr and isinstance(vr.get("content"), str):
+                        text = vr["content"]
+                        low = text.lower()
+                        # Try to find a window around the first matching token
+                        idx = -1
+                        for t in sig_toks:
+                            idx = low.find(t)
+                            if idx >= 0:
+                                break
+                        if idx >= 0:
+                            start = max(0, idx - 80)
+                            end = min(len(text), idx + 200)
+                            snippet = text[start:end].strip()
+                        else:
+                            snippet = text[:220].strip()
+                    answer_bullets.append({
+                        "text": (cit.get("title") or "Source") + (f" — {snippet}" if snippet else ""),
+                        "url": u,
+                        "meeting_id": cit.get("meeting_id"),
+                        "meeting_date": cit.get("meeting_date"),
+                    })
+            except Exception:
+                answer_bullets = []
+            combined = {"answer": answer_text, "source_citations": citations, "answer_bullets": answer_bullets}
         elif not isinstance(combined, dict):
             combined = {}
         vector_sources = combined.get("vector_sources") or results.get("vector_results") or []
