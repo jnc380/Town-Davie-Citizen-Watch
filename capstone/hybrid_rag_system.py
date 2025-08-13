@@ -74,6 +74,26 @@ load_dotenv(dotenv_path=capstone_env, override=False)
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+# Allow overriding log level via env
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+try:
+    logger.setLevel(getattr(logging, _log_level, logging.INFO))
+except Exception:
+    logger.setLevel(logging.INFO)
+
+# Safe logging helpers
+def _host_only(url: Optional[str]) -> str:
+    if not url:
+        return ""
+    try:
+        # crude host extraction without importing urlparse
+        after_scheme = url.split("://", 1)[-1]
+        return after_scheme.split("/", 1)[0]
+    except Exception:
+        return ""
+
+def _present(flag: Optional[str]) -> str:
+    return "set" if flag else "unset"
 
 # Flags defined above for early conditional imports
 # Optional pure-Python BM25
@@ -2194,11 +2214,14 @@ class HybridRAGSystem:
         milvus_uri = os.getenv("MILVUS_URI")
         milvus_token = os.getenv("MILVUS_TOKEN")
         if not milvus_uri or not milvus_token or not query_embedding:
+            logger.debug(
+                f"_zilliz_search skipped: uri={_present(milvus_uri)}, token={_present(milvus_token)}, emb={'set' if query_embedding else 'unset'}"
+            )
             return []
         try:
             search_url = f"{milvus_uri.rstrip('/')}/v2/vectordb/entities/search"
             headers = {
-                "Authorization": f"Bearer {milvus_token}",
+                "Authorization": "Bearer ****",  # redacted
                 "Content-Type": "application/json",
             }
             payload = {
@@ -2207,13 +2230,19 @@ class HybridRAGSystem:
                 "limit": int(top_k),
                 "outputFields": ["text", "metadata", "meeting_id", "meeting_date", "chunk_id", "title"],
             }
-            # Use httpx for async HTTP
+            logger.info(
+                f"Zilliz search host={_host_only(milvus_uri)} collection={self.collection_name} k={top_k}"
+            )
             if httpx is None:
+                logger.warning("httpx not available; cannot call Zilliz HTTP API")
                 return []
             async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(search_url, json=payload, headers=headers)
+                resp = await client.post(search_url, json=payload, headers={"Authorization": f"Bearer {milvus_token}", "Content-Type": "application/json"})
+                logger.debug(f"Zilliz status={resp.status_code}")
                 resp.raise_for_status()
                 result = resp.json() or {}
+            hits_len = len(result.get("data") or [])
+            logger.info(f"Zilliz hits={hits_len}")
             hits: List[Dict[str, Any]] = []
             for hit in (result.get("data") or []):
                 text = hit.get("text") or hit.get("content") or ""
@@ -2235,7 +2264,8 @@ class HybridRAGSystem:
                 }
                 hits.append(item)
             return hits
-        except Exception:
+        except Exception as e:
+            logger.error(f"Zilliz search error: {e}")
             return []
 
     async def _neo4j_query_api_search(self, query_text: str, top_k: int) -> List[Dict[str, Any]]:
@@ -2246,32 +2276,17 @@ class HybridRAGSystem:
         username = os.getenv("NEO4J_USERNAME")
         password = os.getenv("NEO4J_PASSWORD")
         if not api_url or not username or not password or httpx is None:
+            logger.debug(
+                f"neo4j query skipped: url={_present(api_url)} user={_present(username)} pass={_present(password)} httpx={'set' if httpx else 'unset'}"
+            )
             return []
         try:
-            # Basic auth header
-            token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("utf-8")
-            headers = {
-                "Authorization": f"Basic {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            }
-            # Simple Cypher search over AgendaItem
-            statement = (
-                "MATCH (a:AgendaItem) "
-                "WHERE toLower(a.title) CONTAINS toLower($q) "
-                "   OR toLower(a.description) CONTAINS toLower($q) "
-                "   OR toLower(a.summary) CONTAINS toLower($q) "
-                "RETURN a.title AS title, a.description AS content, a.meeting_id AS meeting_id, "
-                "       a.meeting_date AS meeting_date, a.item_id AS item_id "
-                "LIMIT $k"
-            )
-            payload = {"statement": statement, "parameters": {"q": query_text, "k": int(top_k)}}
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(api_url, json=payload, headers=headers)
-                # Neo4j Query API may return 202 Accepted; still has JSON body
-                if resp.status_code not in (200, 202):
-                    return []
-                body = resp.json() or {}
+            logger.info(f"Neo4j Query API host={_host_only(api_url)} k={top_k}")
+            # ... existing code ...
+            if resp.status_code not in (200, 202):
+                logger.error(f"Neo4j status={resp.status_code}")
+                return []
+            body = resp.json() or {}
             # Parse results; spec shows { data: { fields: [...], values: [...] } } or { data: [...] }
             rows: List[List[Any]] = []
             if isinstance(body.get("data"), dict):
@@ -2303,8 +2318,10 @@ class HybridRAGSystem:
                     "item_id": item_id,
                     "type": "agenda_item",
                 })
+            logger.info(f"Neo4j rows={len(rows)} results={len(results)}")
             return results
-        except Exception:
+        except Exception as e:
+            logger.error(f"Neo4j query error: {e}")
             return []
 
 # Pydantic models for API
@@ -2488,10 +2505,12 @@ async def search(req: Request, request: SearchRequest):
                 if iid and str(iid) not in prior_item_ids:
                     prior_item_ids.append(str(iid))
  
+        logger.info(f"/api/search start q_len={len(q)} top_k={top_k}")
         # Run hybrid search
         t_hybrid_start = time.time()
         results = await rag_system.hybrid_search(q, top_k, prior_context=prior_context)
         t_hybrid_ms = int((time.time() - t_hybrid_start) * 1000)
+        logger.info(f"/api/search hybrid_ms={t_hybrid_ms} vec={len(results.get('vector_results') or [])} graph={len(results.get('graph_results') or [])}")
  
         combined = results.get("combined_results", {})
         vector_sources = combined.get("vector_sources") or results.get("vector_results") or []
