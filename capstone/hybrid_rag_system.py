@@ -2243,17 +2243,24 @@ class HybridRAGSystem:
                 "Content-Type": "application/json",
             }
             vector_field = os.getenv("MILVUS_VECTOR_FIELD", "embedding")
+            text_field = os.getenv("MILVUS_TEXT_FIELD", "text")
+            meta_field = os.getenv("MILVUS_METADATA_FIELD", "metadata")
+            meet_id_field = os.getenv("MILVUS_MEETING_ID_FIELD", "meeting_id")
+            meet_date_field = os.getenv("MILVUS_MEETING_DATE_FIELD", "meeting_date")
+            chunk_id_field = os.getenv("MILVUS_CHUNK_ID_FIELD", "chunk_id")
+            title_field = os.getenv("MILVUS_TITLE_FIELD", "title")
+            ofields = [text_field, meta_field, meet_id_field, meet_date_field, chunk_id_field, title_field]
             payload = {
                 "collectionName": self.collection_name,
                 "data": [query_embedding],
                 "limit": int(top_k),
-                "outputFields": ["text", "metadata", "meeting_id", "meeting_date", "chunk_id", "title"],
+                "outputFields": ofields,
                 "annsField": vector_field,
             }
             if expr:
                 payload["filter"] = expr
             logger.info(
-                f"Zilliz search host={_host_only(milvus_uri)} collection={self.collection_name} field={vector_field} k={top_k} expr={'set' if expr else 'unset'}"
+                f"Zilliz search host={_host_only(milvus_uri)} collection={self.collection_name} field={vector_field} k={top_k} expr={'set' if expr else 'unset'} ofields={ofields}"
             )
             if httpx is None:
                 logger.warning("httpx not available; cannot call Zilliz HTTP API")
@@ -2278,19 +2285,19 @@ class HybridRAGSystem:
                 pass
             hits: List[Dict[str, Any]] = []
             for hit in (result.get("data") or []):
-                text = hit.get("text") or hit.get("content") or ""
-                md = hit.get("metadata")
+                text = hit.get(text_field) or hit.get("text") or hit.get("content") or ""
+                md = hit.get(meta_field) or hit.get("metadata")
                 if isinstance(md, str):
                     try:
                         md = json.loads(md)
                     except Exception:
                         pass
                 item = {
-                    "title": hit.get("title") or (md or {}).get("title") or hit.get("chunk_id") or "Result",
+                    "title": hit.get(title_field) or (md or {}).get("title") or hit.get(chunk_id_field) or hit.get("chunk_id") or "Result",
                     "content": text,
-                    "meeting_id": hit.get("meeting_id") or (md or {}).get("meeting_id"),
-                    "meeting_date": hit.get("meeting_date") or (md or {}).get("meeting_date"),
-                    "chunk_id": hit.get("chunk_id") or (md or {}).get("chunk_id"),
+                    "meeting_id": hit.get(meet_id_field) or (md or {}).get("meeting_id"),
+                    "meeting_date": hit.get(meet_date_field) or (md or {}).get("meeting_date"),
+                    "chunk_id": hit.get(chunk_id_field) or (md or {}).get("chunk_id"),
                     "type": (md or {}).get("type") or "document",
                     "url": (md or {}).get("url") or (md or {}).get("agenda_url"),
                     "score": hit.get("distance") or hit.get("score"),
