@@ -86,7 +86,6 @@ def _host_only(url: Optional[str]) -> str:
     if not url:
         return ""
     try:
-        # crude host extraction without importing urlparse
         after_scheme = url.split("://", 1)[-1]
         return after_scheme.split("/", 1)[0]
     except Exception:
@@ -94,6 +93,21 @@ def _host_only(url: Optional[str]) -> str:
 
 def _present(flag: Optional[str]) -> str:
     return "set" if flag else "unset"
+
+# Log runtime config (safe)
+try:
+    _milvus_uri = os.getenv("MILVUS_URI")
+    _neo4j_api = os.getenv("NEO4J_QUERY_API_URL")
+    logger.info(
+        "Runtime config: LOG_LEVEL=%s MILVUS_URI_HOST=%s MILVUS_TOKEN=%s NEO4J_QUERY_API_HOST=%s NEO4J_USER=%s",
+        _log_level,
+        _host_only(_milvus_uri),
+        _present(os.getenv("MILVUS_TOKEN")),
+        _host_only(_neo4j_api),
+        _present(os.getenv("NEO4J_USERNAME")),
+    )
+except Exception:
+    pass
 
 # Flags defined above for early conditional imports
 # Optional pure-Python BM25
@@ -2236,13 +2250,12 @@ class HybridRAGSystem:
             if httpx is None:
                 logger.warning("httpx not available; cannot call Zilliz HTTP API")
                 return []
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=20) as client:
                 resp = await client.post(search_url, json=payload, headers={"Authorization": f"Bearer {milvus_token}", "Content-Type": "application/json"})
                 logger.debug(f"Zilliz status={resp.status_code}")
                 resp.raise_for_status()
                 result = resp.json() or {}
-            hits_len = len(result.get("data") or [])
-            logger.info(f"Zilliz hits={hits_len}")
+            logger.debug(f"Zilliz response keys={list(result.keys())}")
             hits: List[Dict[str, Any]] = []
             for hit in (result.get("data") or []):
                 text = hit.get("text") or hit.get("content") or ""
@@ -2263,6 +2276,11 @@ class HybridRAGSystem:
                     "score": hit.get("distance") or hit.get("score"),
                 }
                 hits.append(item)
+            hits_len = len(hits)
+            logger.info(f"Zilliz hits={hits_len}")
+            if hits_len:
+                prev = (hits[0].get("content") or "")[:120].replace("\n", " ")
+                logger.debug(f"Zilliz top title='{hits[0].get('title')}' preview='{prev}'")
             return hits
         except Exception as e:
             logger.error(f"Zilliz search error: {e}")
@@ -2282,21 +2300,40 @@ class HybridRAGSystem:
             return []
         try:
             logger.info(f"Neo4j Query API host={_host_only(api_url)} k={top_k}")
-            # ... existing code ...
-            if resp.status_code not in (200, 202):
-                logger.error(f"Neo4j status={resp.status_code}")
-                return []
-            body = resp.json() or {}
-            # Parse results; spec shows { data: { fields: [...], values: [...] } } or { data: [...] }
+            # Basic auth header
+            token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("utf-8")
+            headers = {
+                "Authorization": f"Basic {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            statement = (
+                "MATCH (a:AgendaItem) "
+                "WHERE toLower(a.title) CONTAINS toLower($q) "
+                "   OR toLower(a.description) CONTAINS toLower($q) "
+                "   OR toLower(a.summary) CONTAINS toLower($q) "
+                "RETURN a.title AS title, a.description AS content, a.meeting_id AS meeting_id, "
+                "       a.meeting_date AS meeting_date, a.item_id AS item_id "
+                "LIMIT $k"
+            )
+            payload = {"statement": statement, "parameters": {"q": query_text, "k": int(top_k)}}
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(api_url, json=payload, headers=headers)
+                logger.debug(f"Neo4j status={resp.status_code}")
+                if resp.status_code not in (200, 202):
+                    logger.error(f"Neo4j non-success status={resp.status_code}")
+                    return []
+                body = resp.json() or {}
+            logger.debug(f"Neo4j body keys={list(body.keys())}")
+            # Parse results
             rows: List[List[Any]] = []
             if isinstance(body.get("data"), dict):
                 rows = body["data"].get("values") or []
             elif isinstance(body.get("data"), list):
-                # Fallback shape; some deployments return a list of rows directly
                 rows = body["data"]
+            logger.info(f"Neo4j rows={len(rows)}")
             results: List[Dict[str, Any]] = []
             for row in rows:
-                # Expect [ {title, content, meeting_id, meeting_date, item_id} ] order
                 try:
                     title = row[0]
                     content = row[1]
@@ -2304,7 +2341,6 @@ class HybridRAGSystem:
                     meeting_date = row[3]
                     item_id = row[4]
                 except Exception:
-                    # If row is a dict
                     title = (row or {}).get("title")
                     content = (row or {}).get("content")
                     meeting_id = (row or {}).get("meeting_id")
@@ -2318,7 +2354,10 @@ class HybridRAGSystem:
                     "item_id": item_id,
                     "type": "agenda_item",
                 })
-            logger.info(f"Neo4j rows={len(rows)} results={len(results)}")
+            if results:
+                prev = (results[0].get("content") or "")[:120].replace("\n", " ")
+                logger.debug(f"Neo4j top title='{results[0].get('title')}' preview='{prev}'")
+            logger.info(f"Neo4j results={len(results)}")
             return results
         except Exception as e:
             logger.error(f"Neo4j query error: {e}")
@@ -2531,6 +2570,13 @@ async def search(req: Request, request: SearchRequest):
                     "type": c.get("type", "document"),
                 })
             combined = {"answer": answer_text, "source_citations": citations}
+
+        # No-results fallback
+        if not vector_sources and not graph_sources:
+            logger.info("/api/search no-results: vector=0 graph=0; returning fallback message")
+            combined.setdefault("answer", "I couldn't find relevant information for your question. Please try rephrasing or be more specific (names, dates, locations).")
+            combined.setdefault("source_citations", [])
+            total_sources = 0
 
         # Final safety: unwrap accidental JSON-in-string in answer
         try:
