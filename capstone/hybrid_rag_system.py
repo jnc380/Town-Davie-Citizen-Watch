@@ -2737,9 +2737,10 @@ async def index(request: Request):
                   wrap.innerHTML = '<div class="font-semibold mb-1">Why these sources?</div>' +
                     bullets.map((b,i)=>{
                       const tail = [b.meeting_id, b.meeting_date].filter(Boolean).join(' • ');
-                      const text = (b.text||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                      const excerpt = (b.text||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
                       const url = b.url||'#';
-                      return `<div class="mb-1">${i+1}. <a class="text-blue-700 underline" href="${url}" target="_blank" rel="noopener">${text}</a> <span class="text-gray-500">${tail?('('+tail+')'):''}</span></div>`
+                      const why = (b.why||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                      return `<div class="mb-2">${i+1}. <a class="text-blue-700 underline" href="${url}" target="_blank" rel="noopener">click here</a> <span class="text-gray-500">${tail?('('+tail+')'):''}</span><div class="text-gray-600">${why}${excerpt?(' — '+excerpt):''}</div></div>`
                     }).join('');
                   box.appendChild(wrap);
                 } else {
@@ -2851,6 +2852,12 @@ async def search(req: Request, request: SearchRequest):
                     u = vr.get("url")
                     if u and u not in url_to_vec:
                         url_to_vec[u] = vr
+                # Build quick meeting_id set from graph results for linkage hints
+                graph_meeting_ids = set()
+                for gr in (graph_results or []):
+                    mid = gr.get("meeting_id") or (gr.get("agenda_item", {}) if isinstance(gr.get("agenda_item"), dict) else {}).get("meeting_id")
+                    if mid:
+                        graph_meeting_ids.add(str(mid))
                 # Pick significant tokens from query to guide snippet selection
                 import re as _re
                 sig_toks = [t for t in _re.findall(r"[a-zA-Z0-9]+", (q or '').lower()) if len(t) > 3]
@@ -2858,6 +2865,7 @@ async def search(req: Request, request: SearchRequest):
                     u = cit.get("url")
                     vr = url_to_vec.get(u)
                     snippet = None
+                    overlap_tokens: List[str] = []
                     if vr and isinstance(vr.get("content"), str):
                         text = vr["content"]
                         low = text.lower()
@@ -2873,8 +2881,22 @@ async def search(req: Request, request: SearchRequest):
                             snippet = text[start:end].strip()
                         else:
                             snippet = text[:220].strip()
+                        # Compute basic token overlap
+                        overlap_tokens = [t for t in sig_toks if low.find(t) >= 0][:3]
+                    # Build concise rationale
+                    rationale_bits: List[str] = []
+                    rationale_bits.append("high semantic similarity")
+                    if overlap_tokens:
+                        rationale_bits.append("mentions: " + ", ".join(overlap_tokens))
+                    if cit.get("meeting_date"):
+                        rationale_bits.append(f"meeting date {cit.get('meeting_date')}")
+                    mid_str = cit.get("meeting_id") and str(cit.get("meeting_id")) or None
+                    if mid_str and mid_str in graph_meeting_ids:
+                        rationale_bits.append("linked via graph")
+                    rationale = "; ".join(rationale_bits)
                     answer_bullets.append({
-                        "text": (cit.get("title") or "Source") + (f" — {snippet}" if snippet else ""),
+                        "text": (snippet or ""),
+                        "why": rationale,
                         "url": u,
                         "meeting_id": cit.get("meeting_id"),
                         "meeting_date": cit.get("meeting_date"),
