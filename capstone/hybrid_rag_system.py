@@ -2242,7 +2242,10 @@ class HybridRAGSystem:
                 body = resp.json() or {}
             fields: List[str] = []
             try:
-                for f in (body.get("data", {}).get("schema", {}).get("fields", []) or []):
+                data = body.get("data", {}) or {}
+                schema_fields = (data.get("schema", {}) or {}).get("fields", []) or []
+                flat_fields = data.get("fields", []) or []
+                for f in (schema_fields + flat_fields):
                     name = f.get("name")
                     if isinstance(name, str):
                         fields.append(name)
@@ -2254,6 +2257,40 @@ class HybridRAGSystem:
         except Exception as e:
             logger.warning(f"Unable to describe Zilliz collection '{collection_name}': {e}")
             return []
+
+    # Helper: fetch entities by ids to hydrate missing fields
+    async def _zilliz_get_entities_by_ids(
+        self,
+        milvus_uri: str,
+        milvus_token: str,
+        collection_name: str,
+        ids: List[Any],
+        output_fields: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        try:
+            if httpx is None or not ids:
+                return {}
+            url = f"{milvus_uri.rstrip('/')}/v2/vectordb/entities/get"
+            payload = {
+                "collectionName": collection_name,
+                "ids": ids,
+                "outputFields": output_fields,
+            }
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(url, json=payload, headers={"Authorization": f"Bearer {milvus_token}", "Content-Type": "application/json"})
+                resp.raise_for_status()
+                body = resp.json() or {}
+            data = body.get("data") or []
+            out: Dict[str, Dict[str, Any]] = {}
+            for ent in data:
+                ent_id = ent.get("id")
+                if ent_id is not None:
+                    out[str(ent_id)] = ent
+            logger.info(f"Zilliz get entities: fetched={len(out)}")
+            return out
+        except Exception as e:
+            logger.warning(f"Zilliz get entities error: {e}")
+            return {}
 
     async def _zilliz_search(self, query_embedding: List[float], top_k: int, expr: Optional[str] = None) -> List[Dict[str, Any]]:
         """Search Zilliz/Milvus over HTTPS using the VectorDB REST API.
@@ -2273,68 +2310,126 @@ class HybridRAGSystem:
                 "Content-Type": "application/json",
             }
             vector_field = os.getenv("MILVUS_VECTOR_FIELD", "embedding")
-            text_field = os.getenv("MILVUS_TEXT_FIELD", "text")
+            text_field = os.getenv("MILVUS_TEXT_FIELD", "content")
             meta_field = os.getenv("MILVUS_METADATA_FIELD", "metadata")
             meet_id_field = os.getenv("MILVUS_MEETING_ID_FIELD", "meeting_id")
             meet_date_field = os.getenv("MILVUS_MEETING_DATE_FIELD", "meeting_date")
             chunk_id_field = os.getenv("MILVUS_CHUNK_ID_FIELD", "chunk_id")
-            title_field = os.getenv("MILVUS_TITLE_FIELD", "title")
-            ofields = [text_field, meta_field, meet_id_field, meet_date_field, chunk_id_field, title_field]
-            payload = {
-                "collectionName": self.collection_name,
-                "data": [query_embedding],
-                "limit": int(top_k),
-                "outputFields": ofields,
-                "annsField": vector_field,
-            }
-            if expr:
-                payload["filter"] = expr
-            logger.info(
-                f"Zilliz search host={_host_only(milvus_uri)} collection={self.collection_name} field={vector_field} k={top_k} expr={'set' if expr else 'unset'} ofields={ofields}"
-            )
-            if httpx is None:
-                logger.warning("httpx not available; cannot call Zilliz HTTP API")
-                return []
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.post(search_url, json=payload, headers={"Authorization": f"Bearer {milvus_token}", "Content-Type": "application/json"})
-                logger.debug(f"Zilliz status={resp.status_code}")
-                resp.raise_for_status()
-                result = resp.json() or {}
-            logger.debug(f"Zilliz response keys={list(result.keys())}")
-            # Zilliz returns {code:int, message:str, data:optional}
-            try:
-                code = result.get("code")
-                msg = result.get("message")
-                if code is not None and code != 0:
-                    logger.error(f"Zilliz API error code={code} message={msg}")
-                    return []
-                if "data" not in result:
-                    logger.warning(f"Zilliz response missing 'data'; message={msg}")
-                    return []
-            except Exception:
-                pass
-            hits: List[Dict[str, Any]] = []
-            for hit in (result.get("data") or []):
-                text = (hit.get(text_field) if text_field else None) or hit.get("text") or hit.get("content") or ""
-                md = (hit.get(meta_field) if meta_field else None) or hit.get("metadata")
-                if isinstance(md, str):
-                    try:
-                        md = json.loads(md)
-                    except Exception:
-                        pass
-                item = {
-                    "title": (hit.get(title_field) if title_field else None) or (md or {}).get("title") or (hit.get(chunk_id_field) if chunk_id_field else None) or hit.get("chunk_id") or "Result",
-                    "content": text,
-                    "meeting_id": (hit.get(meet_id_field) if meet_id_field else None) or (md or {}).get("meeting_id"),
-                    "meeting_date": (hit.get(meet_date_field) if meet_date_field else None) or (md or {}).get("meeting_date"),
-                    "chunk_id": (hit.get(chunk_id_field) if chunk_id_field else None) or (md or {}).get("chunk_id"),
-                    "type": (md or {}).get("type") or "document",
-                    "url": (md or {}).get("url") or (md or {}).get("agenda_url"),
-                    "score": hit.get("distance") or hit.get("score"),
+            title_field = os.getenv("MILVUS_TITLE_FIELD", "chunk_id")
+            requested_fields = [text_field, meta_field, meet_id_field, meet_date_field, chunk_id_field, title_field]
+            # Filter output fields to only those that exist to avoid "field ... not exist"
+            available = await self._zilliz_describe_fields(milvus_uri, milvus_token, self.collection_name)
+            ofields = [f for f in requested_fields if f and f in (available or [])]
+            async def _do_search(use_filter: bool) -> Tuple[List[Dict[str, Any]], List[Any]]:
+                payload = {
+                    "collectionName": self.collection_name,
+                    "data": [query_embedding],
+                    "limit": int(top_k),
+                    "outputFields": ofields,
+                    "annsField": vector_field,
                 }
-                hits.append(item)
+                if use_filter and expr:
+                    payload["filter"] = expr
+                logger.info(
+                    f"Zilliz search host={_host_only(milvus_uri)} collection={self.collection_name} field={vector_field} k={top_k} expr={'set' if (use_filter and expr) else 'unset'} ofields={ofields}"
+                )
+                if httpx is None:
+                    logger.warning("httpx not available; cannot call Zilliz HTTP API")
+                    return [], []
+                ids_local: List[Any] = []
+                async def _call_once() -> Dict[str, Any]:
+                    async with httpx.AsyncClient(timeout=20) as client:
+                        resp = await client.post(search_url, json=payload, headers={"Authorization": f"Bearer {milvus_token}", "Content-Type": "application/json"})
+                        logger.debug(f"Zilliz status={resp.status_code}")
+                        resp.raise_for_status()
+                        return resp.json() or {}
+                # Since we are already in an async function, simply await
+                try:
+                    result_inner = await _call_once()
+                except Exception as _e:
+                    logger.warning(f"Zilliz call error: {_e}")
+                    return [], []
+                try:
+                    code = result_inner.get("code")
+                    msg = result_inner.get("message")
+                    if code is not None and code != 0:
+                        logger.error(f"Zilliz API error code={code} message={msg}")
+                        return [], []
+                    if "data" not in result_inner:
+                        logger.warning(f"Zilliz response missing 'data'; message={msg}")
+                        return [], []
+                except Exception:
+                    pass
+                parsed: List[Dict[str, Any]] = []
+                for hit in (result_inner.get("data") or []):
+                    if "id" in hit:
+                        ids_local.append(hit.get("id"))
+                    text = (hit.get(text_field) if text_field else None) or hit.get("text") or hit.get("content") or ""
+                    md = (hit.get(meta_field) if meta_field else None) or hit.get("metadata")
+                    if isinstance(md, str):
+                        try:
+                            md = json.loads(md)
+                        except Exception:
+                            pass
+                    item = {
+                        "title": (hit.get(title_field) if title_field else None) or (md or {}).get("title") or (hit.get(chunk_id_field) if chunk_id_field else None) or hit.get("chunk_id") or "Result",
+                        "content": text,
+                        "meeting_id": (hit.get(meet_id_field) if meet_id_field else None) or (md or {}).get("meeting_id"),
+                        "meeting_date": (hit.get(meet_date_field) if meet_date_field else None) or (md or {}).get("meeting_date"),
+                        "chunk_id": (hit.get(chunk_id_field) if chunk_id_field else None) or (md or {}).get("chunk_id"),
+                        "type": (md or {}).get("type") or "document",
+                        "url": (md or {}).get("url") or (md or {}).get("agenda_url"),
+                        "score": hit.get("distance") or hit.get("score"),
+                    }
+                    parsed.append(item)
+                return parsed, ids_local
+            # First attempt: with filter if provided
+            hits, ids = await _do_search(use_filter=True)
+            if not hits and expr:
+                logger.info("Zilliz: no hits with filter; retrying without filter")
+                hits, ids = await _do_search(use_filter=False)
             hits_len = len(hits)
             logger.info(f"Zilliz hits={hits_len}")
+            # Fallback: hydrate by ids if we have no content in any hit
+            if hits_len and not any((h.get("content") or "").strip() for h in hits):
+                # choose a fallback text field if not present in ofields
+                fallback_text = None
+                prefs = [os.getenv("MILVUS_TEXT_FIELD"), "text", "content", "body", "document", "chunk", "chunk_text"]
+                for p in prefs:
+                    if p and p in (available or []):
+                        fallback_text = p
+                        break
+                hydrate_fields = [f for f in {fallback_text, meta_field, meet_id_field, meet_date_field, chunk_id_field, title_field} if f and ((available is None) or (f in (available or [])))]
+                if ids and hydrate_fields:
+                    logger.info(f"Zilliz fallback hydration by ids: count={len(ids)} fields={hydrate_fields}")
+                    ent_map = await self._zilliz_get_entities_by_ids(milvus_uri, milvus_token, self.collection_name, ids, hydrate_fields)
+                    # merge
+                    for i, h in enumerate(hits):
+                        key = str(ids[i]) if i < len(ids) else None
+                        ent = ent_map.get(key) if key else None
+                        if ent:
+                            txt = (ent.get(fallback_text) if fallback_text else None) or h.get("content") or ""
+                            md2 = (ent.get(meta_field) if meta_field else None) or {}
+                            if isinstance(md2, str):
+                                try:
+                                    md2 = json.loads(md2)
+                                except Exception:
+                                    pass
+                            h["content"] = txt
+                            h["title"] = h.get("title") or (ent.get(title_field) if title_field else None) or (md2 or {}).get("title") or h.get("title")
+                            h["meeting_id"] = h.get("meeting_id") or ent.get(meet_id_field) or (md2 or {}).get("meeting_id")
+                            h["meeting_date"] = h.get("meeting_date") or ent.get(meet_date_field) or (md2 or {}).get("meeting_date")
+                            h["chunk_id"] = h.get("chunk_id") or ent.get(chunk_id_field) or (md2 or {}).get("chunk_id")
+                elif ids and not hydrate_fields:
+                    # attempt hydration with no outputFields to let server decide defaults
+                    logger.info("Zilliz fallback hydration by ids with no explicit fields")
+                    ent_map = await self._zilliz_get_entities_by_ids(milvus_uri, milvus_token, self.collection_name, ids, [])
+                    for i, h in enumerate(hits):
+                        key = str(ids[i]) if i < len(ids) else None
+                        ent = ent_map.get(key) if key else None
+                        if ent:
+                            txt = ent.get("text") or ent.get("content") or h.get("content") or ""
+                            h["content"] = txt
             if hits_len:
                 prev = (hits[0].get("content") or "")[:120].replace("\n", " ")
                 logger.debug(f"Zilliz top title='{hits[0].get('title')}' preview='{prev}'")
