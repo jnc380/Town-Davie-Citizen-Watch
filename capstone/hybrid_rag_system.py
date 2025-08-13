@@ -2659,34 +2659,80 @@ async def index(request: Request):
         # Embedded minimal HTML fallback so the UI still renders on Vercel
         html = """
         <!DOCTYPE html>
-        <html><head><meta charset=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>
-        <title>Town of Davie Citizen Watch</title>
-        <link href=\"https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css\" rel=\"stylesheet\">
+        <html lang=\"en\">
+        <head>
+          <meta charset=\"utf-8\"/>
+          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>
+          <title>Town of Davie Citizen Watch</title>
+          <link href=\"https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css\" rel=\"stylesheet\">
+          <link href=\"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css\" rel=\"stylesheet\">
+          <style>
+            .chat-container { height: 60vh; overflow-y: auto; }
+            .message { animation: fadeIn .2s ease-in; }
+            @keyframes fadeIn { from {opacity:0;transform:translateY(6px)} to {opacity:1;transform:translateY(0)} }
+            .loader { width:20px;height:20px;border:3px solid #e5e7eb;border-top-color:#3b82f6;border-radius:50%;animation:spin 1s linear infinite }
+            @keyframes spin { to { transform: rotate(360deg) } }
+          </style>
         </head>
         <body class=\"bg-gray-50\">
-          <div class=\"max-w-3xl mx-auto mt-10 p-6 bg-white shadow rounded\">
-            <h1 class=\"text-2xl font-bold mb-2\">Town of Davie Citizen Watch</h1>
-            <p class=\"text-gray-600 mb-6\">Service is running. Default UI loaded because no templates directory was found.</p>
-            <form id=\"chat-form\" class=\"flex space-x-2\" onsubmit=\"event.preventDefault(); sendMessage();\">
-              <input id=\"message-input\" class=\"flex-1 border rounded px-3 py-2\" placeholder=\"Ask a question...\"/>
-              <button class=\"bg-blue-600 text-white px-4 py-2 rounded\">Send</button>
-            </form>
-            <div id=\"chat-messages\" class=\"mt-4 space-y-3\"></div>
+          <div class=\"max-w-4xl mx-auto p-4\">
+            <div class=\"rounded-lg shadow bg-white\">
+              <div class=\"px-6 py-4 border-b flex items-center justify-between\">
+                <div>
+                  <h1 class=\"text-xl font-semibold\">Town of Davie Citizen Watch</h1>
+                  <p class=\"text-sm text-gray-500\">Ask about meetings, agenda items, decisions, and more.</p>
+                </div>
+                <a href=\"/api/health\" class=\"text-sm text-blue-600 underline\">Health</a>
+              </div>
+              <div class=\"px-6 py-4\">
+                <div id=\"chat-messages\" class=\"chat-container space-y-3\">
+                  <div class=\"message bg-blue-50 rounded p-3 text-gray-800\">
+                    <div class=\"font-medium mb-1\"><i class=\"fa-solid fa-circle-info mr-1\"></i>Welcome</div>
+                    <div class=\"text-sm\">Type a question like: <span class=\"italic\">\"What did the council decide about Pine Island Road?\"</span></div>
+                  </div>
+                </div>
+              </div>
+              <div class=\"px-6 py-4 border-t\">
+                <form id=\"chat-form\" class=\"flex items-center gap-2\" onsubmit=\"event.preventDefault(); sendMessage();\">
+                  <input id=\"message-input\" class=\"flex-1 border rounded px-3 py-2 focus:outline-none focus:ring focus:border-blue-300\" placeholder=\"Ask a question...\" />
+                  <button class=\"bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition\"><i class=\"fa-solid fa-paper-plane\"></i> Send</button>
+                </form>
+              </div>
+            </div>
           </div>
           <script>
+            function renderSources(box, list){
+              if(!Array.isArray(list) || !list.length) return;
+              const wrap = document.createElement('div');
+              wrap.className = 'mt-2 text-sm text-gray-700';
+              wrap.innerHTML = '<div class="font-semibold mb-1">Sources</div>' +
+                list.map((c,i)=>{
+                  const title = (c.title||c.url||'Source');
+                  const url = c.url||'#';
+                  const tail = [c.meeting_id, c.meeting_date].filter(Boolean).join(' • ');
+                  return `<div class="truncate">${i+1}. <a class="text-blue-700 underline" href="${url}" target="_blank" rel="noopener">${title}</a> <span class="text-gray-500">${tail?('('+tail+')'):''}</span></div>`
+                }).join('');
+              box.appendChild(wrap);
+            }
             async function sendMessage(){
               const input = document.getElementById('message-input');
               const msg = (input.value||'').trim();
               if(!msg) return;
               input.value='';
               const box = document.getElementById('chat-messages');
-              const user = document.createElement('div'); user.className='p-3 bg-green-50 rounded'; user.textContent=msg; box.appendChild(user);
+              const user = document.createElement('div');
+              user.className='message bg-green-50 rounded p-3';
+              user.textContent=msg; box.appendChild(user);
+              const thinking = document.createElement('div'); thinking.className='message flex items-center gap-2 text-gray-600'; thinking.innerHTML='<span class="loader"></span><span>Thinking...</span>'; box.appendChild(thinking);
+              box.scrollTop = box.scrollHeight;
               try{
                 const r = await fetch('/api/search', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({query: msg, top_k: 10})});
                 const data = await r.json();
-                const ai = document.createElement('div'); ai.className='p-3 bg-blue-50 rounded'; ai.textContent=(data && data.answer) || 'No answer'; box.appendChild(ai);
-              }catch(e){ const er=document.createElement('div'); er.className='p-3 bg-red-50 rounded'; er.textContent='Error contacting API'; box.appendChild(er); }
-              box.scrollTop = box.scrollHeight;
+                thinking.remove();
+                const ai = document.createElement('div'); ai.className='message bg-gray-50 rounded p-3 whitespace-pre-wrap'; ai.textContent=(data && data.answer) || 'No answer'; box.appendChild(ai);
+                renderSources(box, (data && data.source_citations)||[]);
+                box.scrollTop = box.scrollHeight;
+              }catch(e){ thinking.innerHTML='<span class="text-red-600">Error contacting API</span>'; }
             }
           </script>
         </body></html>
