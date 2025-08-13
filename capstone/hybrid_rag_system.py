@@ -22,6 +22,7 @@ from collections import deque, defaultdict
 from capstone.telemetry import init_if_configured as telemetry_init, record_event, upsert_session
 from capstone.telemetry import get_status as telemetry_status
 import hashlib
+import base64
 
 # Serverless-safe mode: always skip local Milvus/Neo4j on Vercel
 LIGHT_DEPLOYMENT = True
@@ -814,8 +815,9 @@ class HybridRAGSystem:
                     query_embedding = await self.get_embedding(query)
 
                 # Remote calls
-                vector_results = await _remote_vector_search(query, top_k * 2)
-                graph_results = await _remote_graph_search(query, top_k)
+                vector_results = await self._zilliz_search(query_embedding, top_k * 2)
+                # Prefer Neo4j Query API if configured; else leave graph empty
+                graph_results = await self._neo4j_query_api_search(query, top_k)
 
                 # Fuse (treat remote vector as dense; no sparse in light mode)
                 fused_results = self._fuse_dense_sparse(vector_results, [], top_k * 2, alpha=alpha)
@@ -2184,6 +2186,126 @@ class HybridRAGSystem:
                 "score": g.get("score"),
             })
         return combined
+
+    async def _zilliz_search(self, query_embedding: List[float], top_k: int) -> List[Dict[str, Any]]:
+        """Search Zilliz/Milvus over HTTPS using the VectorDB REST API.
+        Requires MILVUS_URI, MILVUS_TOKEN, and self.collection_name.
+        """
+        milvus_uri = os.getenv("MILVUS_URI")
+        milvus_token = os.getenv("MILVUS_TOKEN")
+        if not milvus_uri or not milvus_token or not query_embedding:
+            return []
+        try:
+            search_url = f"{milvus_uri.rstrip('/')}/v2/vectordb/entities/search"
+            headers = {
+                "Authorization": f"Bearer {milvus_token}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "collectionName": self.collection_name,
+                "data": [query_embedding],
+                "limit": int(top_k),
+                "outputFields": ["text", "metadata", "meeting_id", "meeting_date", "chunk_id", "title"],
+            }
+            # Use httpx for async HTTP
+            if httpx is None:
+                return []
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(search_url, json=payload, headers=headers)
+                resp.raise_for_status()
+                result = resp.json() or {}
+            hits: List[Dict[str, Any]] = []
+            for hit in (result.get("data") or []):
+                text = hit.get("text") or hit.get("content") or ""
+                md = hit.get("metadata")
+                if isinstance(md, str):
+                    try:
+                        md = json.loads(md)
+                    except Exception:
+                        pass
+                item = {
+                    "title": hit.get("title") or (md or {}).get("title") or hit.get("chunk_id") or "Result",
+                    "content": text,
+                    "meeting_id": hit.get("meeting_id") or (md or {}).get("meeting_id"),
+                    "meeting_date": hit.get("meeting_date") or (md or {}).get("meeting_date"),
+                    "chunk_id": hit.get("chunk_id") or (md or {}).get("chunk_id"),
+                    "type": (md or {}).get("type") or "document",
+                    "url": (md or {}).get("url") or (md or {}).get("agenda_url"),
+                    "score": hit.get("distance") or hit.get("score"),
+                }
+                hits.append(item)
+            return hits
+        except Exception:
+            return []
+
+    async def _neo4j_query_api_search(self, query_text: str, top_k: int) -> List[Dict[str, Any]]:
+        """Query Neo4j over HTTPS using the Query API. Requires NEO4J_QUERY_API_URL, NEO4J_USERNAME, NEO4J_PASSWORD.
+        This uses a simple CONTAINS match over common AgendaItem fields as a lightweight fallback.
+        """
+        api_url = os.getenv("NEO4J_QUERY_API_URL")
+        username = os.getenv("NEO4J_USERNAME")
+        password = os.getenv("NEO4J_PASSWORD")
+        if not api_url or not username or not password or httpx is None:
+            return []
+        try:
+            # Basic auth header
+            token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("utf-8")
+            headers = {
+                "Authorization": f"Basic {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            # Simple Cypher search over AgendaItem
+            statement = (
+                "MATCH (a:AgendaItem) "
+                "WHERE toLower(a.title) CONTAINS toLower($q) "
+                "   OR toLower(a.description) CONTAINS toLower($q) "
+                "   OR toLower(a.summary) CONTAINS toLower($q) "
+                "RETURN a.title AS title, a.description AS content, a.meeting_id AS meeting_id, "
+                "       a.meeting_date AS meeting_date, a.item_id AS item_id "
+                "LIMIT $k"
+            )
+            payload = {"statement": statement, "parameters": {"q": query_text, "k": int(top_k)}}
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(api_url, json=payload, headers=headers)
+                # Neo4j Query API may return 202 Accepted; still has JSON body
+                if resp.status_code not in (200, 202):
+                    return []
+                body = resp.json() or {}
+            # Parse results; spec shows { data: { fields: [...], values: [...] } } or { data: [...] }
+            rows: List[List[Any]] = []
+            if isinstance(body.get("data"), dict):
+                rows = body["data"].get("values") or []
+            elif isinstance(body.get("data"), list):
+                # Fallback shape; some deployments return a list of rows directly
+                rows = body["data"]
+            results: List[Dict[str, Any]] = []
+            for row in rows:
+                # Expect [ {title, content, meeting_id, meeting_date, item_id} ] order
+                try:
+                    title = row[0]
+                    content = row[1]
+                    meeting_id = row[2]
+                    meeting_date = row[3]
+                    item_id = row[4]
+                except Exception:
+                    # If row is a dict
+                    title = (row or {}).get("title")
+                    content = (row or {}).get("content")
+                    meeting_id = (row or {}).get("meeting_id")
+                    meeting_date = (row or {}).get("meeting_date")
+                    item_id = (row or {}).get("item_id")
+                results.append({
+                    "title": title or "Agenda Item",
+                    "content": content or "",
+                    "meeting_id": meeting_id,
+                    "meeting_date": meeting_date,
+                    "item_id": item_id,
+                    "type": "agenda_item",
+                })
+            return results
+        except Exception:
+            return []
 
 # Pydantic models for API
 class SearchRequest(BaseModel):
