@@ -15,7 +15,6 @@
 !/capstone/
 !/capstone/telemetry.py
 !/capstone/hybrid_rag_system.py
-!/capstone/vercel.json
 !/capstone/requirements-vercel.txt
 !/capstone/youtube_url_mapper.py
 !/capstone/templates/
@@ -24,6 +23,10 @@
 !/capstone/agenda_processes/agenda_scraper.py
 !/capstone/youtube_processes/
 !/capstone/youtube_processes/youtube_hybrid_downloader.py
+
+# Also allow root templates for Vercel packaging
+!/templates/
+!/templates/index.html
 
 # Explicitly ignore sensitive and heavy content even if dir is allowed
 /capstone/env.example
