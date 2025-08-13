@@ -1381,7 +1381,7 @@ class HybridRAGSystem:
                     "properties": {
                         "answer_paragraph": {
                             "type": "string",
-                            "description": "1–2 short paragraphs, plain English, citizen-friendly, grounded strictly in the provided context. Mention amounts/outcomes/dates/companies/vendors/council members when applicable. If the question is out of scope for the current index/year, return exactly: 'No indexed data for the current scope.'"
+                            "description": "Return only 1–2 short paragraphs in plain English, grounded strictly in the provided context. No lists, no HTML, no raw pasted source text. Mention amounts/outcomes/dates/companies/vendors/council members when applicable. If out of scope for the current YEAR_FILTER, return exactly: 'No indexed data for the current scope.'"
                         },
                         "citations": {
                             "type": "array",
@@ -1404,7 +1404,7 @@ class HybridRAGSystem:
                     messages=messages,
                     temperature=0.2,
                     response_format=_response_format(),
-                    max_tokens=getattr(self, "final_max_tokens", 350),
+                    max_tokens=getattr(self, "final_max_tokens", 220),
                 )
                 content = resp.choices[0].message.content or "{}"
                 return json.loads(content)
@@ -1415,12 +1415,13 @@ class HybridRAGSystem:
                     model="gpt-4o-mini",
                     messages=messages,
                     temperature=0.2,
-                    max_tokens=getattr(self, "final_max_tokens", 350),
+                    max_tokens=getattr(self, "final_max_tokens", 220),
                 )
                 content = resp.choices[0].message.content or ""
                 # Build best-effort paragraph from content
                 para = " ".join([ln.strip() for ln in content.splitlines() if ln.strip()])
-                return {"answer_paragraph": para[:600], "citations": re.findall(r"https?://\S+", content)[:5]}
+                # Trim to ~2 short paragraphs
+                return {"answer_paragraph": para[:900], "citations": re.findall(r"https?://\S+", content)[:5]}
         except Exception as e:
             logger.warning(f"Final synthesis failed: {e}")
             return None
