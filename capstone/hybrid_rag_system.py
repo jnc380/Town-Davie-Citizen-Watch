@@ -174,7 +174,11 @@ class HybridRAGSystem:
         self.milvus_uri = os.getenv("MILVUS_URI", "")
         self.milvus_token = os.getenv("MILVUS_TOKEN", "")
         self.collection_name = os.getenv("MILVUS_COLLECTION", "capstone_hybrid_rag")
-
+        try:
+            logger.info(f"Milvus collection configured: {self.collection_name}")
+        except Exception:
+            pass
+        
         # Neo4j config (env only)
         self.neo4j_uri = os.getenv("NEO4J_URI", "")
         self.neo4j_username = os.getenv("NEO4J_USERNAME", "")
@@ -2256,6 +2260,18 @@ class HybridRAGSystem:
                 resp.raise_for_status()
                 result = resp.json() or {}
             logger.debug(f"Zilliz response keys={list(result.keys())}")
+            # Zilliz returns {code:int, message:str, data:optional}
+            try:
+                code = result.get("code")
+                msg = result.get("message")
+                if code is not None and code != 0:
+                    logger.error(f"Zilliz API error code={code} message={msg}")
+                    return []
+                if "data" not in result:
+                    logger.warning(f"Zilliz response missing 'data'; message={msg}")
+                    return []
+            except Exception:
+                pass
             hits: List[Dict[str, Any]] = []
             for hit in (result.get("data") or []):
                 text = hit.get("text") or hit.get("content") or ""
@@ -2522,7 +2538,10 @@ async def search(req: Request, request: SearchRequest):
                 hashed_ip = hashlib.sha256(f"{salt}:{client_ip}".encode("utf-8")).hexdigest()
         except Exception:
             hashed_ip = None
-        upsert_session(session_id, hashed_ip, user_agent)
+        try:
+            upsert_session(session_id, hashed_ip, user_agent)
+        except Exception as e:
+            logger.warning(f"telemetry upsert_session failed: {e}")
 
         # Prepare prior context summary (last up to 3 turns compact)
         prior_turns = list(CONVERSATIONS.get(session_id, deque()))
@@ -2652,7 +2671,10 @@ async def search(req: Request, request: SearchRequest):
             "validation_flags": {"prompt_injection": False},
             "pii_redaction_applied": False, "pii_fields_found": 0,
         }
-        record_event(event)
+        try:
+            record_event(event)
+        except Exception as e:
+            logger.warning(f"telemetry record_event failed: {e}")
 
         # Include session_id in a header for the client to persist
         headers = {"X-Session-Id": session_id}
@@ -2670,6 +2692,7 @@ async def search(req: Request, request: SearchRequest):
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("/api/search error")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/stats")
