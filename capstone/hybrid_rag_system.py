@@ -2225,6 +2225,36 @@ class HybridRAGSystem:
             })
         return combined
 
+    _zilliz_fields_cache: Dict[str, List[str]] = {}
+
+    async def _zilliz_describe_fields(self, milvus_uri: str, milvus_token: str, collection_name: str) -> List[str]:
+        try:
+            cache_key = f"{_host_only(milvus_uri)}::{collection_name}"
+            if cache_key in self._zilliz_fields_cache:
+                return self._zilliz_fields_cache[cache_key]
+            url = f"{milvus_uri.rstrip('/')}/v2/vectordb/collections/describe"
+            payload = {"collectionName": collection_name}
+            if httpx is None:
+                return []
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(url, json=payload, headers={"Authorization": f"Bearer {milvus_token}", "Content-Type": "application/json"})
+                resp.raise_for_status()
+                body = resp.json() or {}
+            fields: List[str] = []
+            try:
+                for f in (body.get("data", {}).get("schema", {}).get("fields", []) or []):
+                    name = f.get("name")
+                    if isinstance(name, str):
+                        fields.append(name)
+            except Exception:
+                pass
+            self._zilliz_fields_cache[cache_key] = fields
+            logger.info(f"Zilliz available fields for {collection_name}: {fields}")
+            return fields
+        except Exception as e:
+            logger.warning(f"Unable to describe Zilliz collection '{collection_name}': {e}")
+            return []
+
     async def _zilliz_search(self, query_embedding: List[float], top_k: int, expr: Optional[str] = None) -> List[Dict[str, Any]]:
         """Search Zilliz/Milvus over HTTPS using the VectorDB REST API.
         Requires MILVUS_URI, MILVUS_TOKEN, and self.collection_name.
@@ -2285,19 +2315,19 @@ class HybridRAGSystem:
                 pass
             hits: List[Dict[str, Any]] = []
             for hit in (result.get("data") or []):
-                text = hit.get(text_field) or hit.get("text") or hit.get("content") or ""
-                md = hit.get(meta_field) or hit.get("metadata")
+                text = (hit.get(text_field) if text_field else None) or hit.get("text") or hit.get("content") or ""
+                md = (hit.get(meta_field) if meta_field else None) or hit.get("metadata")
                 if isinstance(md, str):
                     try:
                         md = json.loads(md)
                     except Exception:
                         pass
                 item = {
-                    "title": hit.get(title_field) or (md or {}).get("title") or hit.get(chunk_id_field) or hit.get("chunk_id") or "Result",
+                    "title": (hit.get(title_field) if title_field else None) or (md or {}).get("title") or (hit.get(chunk_id_field) if chunk_id_field else None) or hit.get("chunk_id") or "Result",
                     "content": text,
-                    "meeting_id": hit.get(meet_id_field) or (md or {}).get("meeting_id"),
-                    "meeting_date": hit.get(meet_date_field) or (md or {}).get("meeting_date"),
-                    "chunk_id": hit.get(chunk_id_field) or (md or {}).get("chunk_id"),
+                    "meeting_id": (hit.get(meet_id_field) if meet_id_field else None) or (md or {}).get("meeting_id"),
+                    "meeting_date": (hit.get(meet_date_field) if meet_date_field else None) or (md or {}).get("meeting_date"),
+                    "chunk_id": (hit.get(chunk_id_field) if chunk_id_field else None) or (md or {}).get("chunk_id"),
                     "type": (md or {}).get("type") or "document",
                     "url": (md or {}).get("url") or (md or {}).get("agenda_url"),
                     "score": hit.get("distance") or hit.get("score"),
