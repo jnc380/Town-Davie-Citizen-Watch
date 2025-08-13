@@ -2310,14 +2310,16 @@ class HybridRAGSystem:
                 "Authorization": "Bearer ****",  # redacted
                 "Content-Type": "application/json",
             }
-            vector_field = os.getenv("MILVUS_VECTOR_FIELD", "embedding")
-            text_field = os.getenv("MILVUS_TEXT_FIELD", "content")
-            meta_field = os.getenv("MILVUS_METADATA_FIELD", "metadata")
-            meet_id_field = os.getenv("MILVUS_MEETING_ID_FIELD", "meeting_id")
-            meet_date_field = os.getenv("MILVUS_MEETING_DATE_FIELD", "meeting_date")
-            chunk_id_field = os.getenv("MILVUS_CHUNK_ID_FIELD", "chunk_id")
-            title_field = os.getenv("MILVUS_TITLE_FIELD", "chunk_id")
-            requested_fields = [text_field, meta_field, meet_id_field, meet_date_field, chunk_id_field, title_field]
+            # Hardcoded field mapping for serverless simplicity
+            vector_field = "embedding"
+            text_field = "content"
+            meta_field = "metadata"
+            meet_id_field = "meeting_id"
+            meet_date_field = "meeting_date"
+            meet_type_field = "meeting_type"
+            chunk_id_field = "chunk_id"
+            title_field = "chunk_id"
+            requested_fields = [text_field, meta_field, meet_id_field, meet_date_field, meet_type_field, chunk_id_field, title_field]
             # Filter output fields to only those that exist to avoid "field ... not exist"
             available = await self._zilliz_describe_fields(milvus_uri, milvus_token, self.collection_name)
             ofields = [f for f in requested_fields if f and f in (available or [])]
@@ -2377,6 +2379,7 @@ class HybridRAGSystem:
                         "content": text,
                         "meeting_id": (hit.get(meet_id_field) if meet_id_field else None) or (md or {}).get("meeting_id"),
                         "meeting_date": (hit.get(meet_date_field) if meet_date_field else None) or (md or {}).get("meeting_date"),
+                        "meeting_type": (hit.get(meet_type_field) if meet_type_field else None) or (md or {}).get("meeting_type"),
                         "chunk_id": (hit.get(chunk_id_field) if chunk_id_field else None) or (md or {}).get("chunk_id"),
                         "type": (md or {}).get("type") or "document",
                         "url": (md or {}).get("url") or (md or {}).get("agenda_url"),
@@ -2400,7 +2403,7 @@ class HybridRAGSystem:
                     if p and p in (available or []):
                         fallback_text = p
                         break
-                hydrate_fields = [f for f in {fallback_text, meta_field, meet_id_field, meet_date_field, chunk_id_field, title_field} if f and ((available is None) or (f in (available or [])))]
+                hydrate_fields = [f for f in {fallback_text, meta_field, meet_id_field, meet_date_field, meet_type_field, chunk_id_field, title_field} if f and ((available is None) or (f in (available or [])))]
                 if ids and hydrate_fields:
                     logger.info(f"Zilliz fallback hydration by ids: count={len(ids)} fields={hydrate_fields}")
                     ent_map = await self._zilliz_get_entities_by_ids(milvus_uri, milvus_token, self.collection_name, ids, hydrate_fields)
@@ -2420,6 +2423,7 @@ class HybridRAGSystem:
                             h["title"] = h.get("title") or (ent.get(title_field) if title_field else None) or (md2 or {}).get("title") or h.get("title")
                             h["meeting_id"] = h.get("meeting_id") or ent.get(meet_id_field) or (md2 or {}).get("meeting_id")
                             h["meeting_date"] = h.get("meeting_date") or ent.get(meet_date_field) or (md2 or {}).get("meeting_date")
+                            h["meeting_type"] = h.get("meeting_type") or ent.get(meet_type_field) or (md2 or {}).get("meeting_type")
                             h["chunk_id"] = h.get("chunk_id") or ent.get(chunk_id_field) or (md2 or {}).get("chunk_id")
                 elif ids and not hydrate_fields:
                     # attempt hydration with no outputFields to let server decide defaults
@@ -2562,6 +2566,95 @@ class HybridRAGSystem:
             return results
         except Exception as e:
             logger.error(f"Neo4j query error: {e}")
+            return []
+
+    async def _explain_and_rerank_sources(self, question: str, final_answer: str, sources: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
+        try:
+            if not sources:
+                return []
+            # Construct a compact prompt that asks for citizen-friendly explanations and reranking
+            sys_msg = (
+                "You are a civic information assistant. Given a question, the assistant's final answer, and a set of supporting sources (title, meeting_type, meeting_date, url, short excerpt), "
+                "produce a brief list of the top N sources with for each: a one-sentence summary for citizens explaining why this source supports the answer, and a simple why string (no jargon)."
+            )
+            user_payload = {
+                "question": question,
+                "final_answer": final_answer,
+                "sources": sources,
+                "top_k": max(1, int(top_k)),
+            }
+            schema = {
+                "name": "explain_and_rerank",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "url": {"type": "string"},
+                                    "meeting_type": {"type": "string"},
+                                    "meeting_date": {"type": "string"},
+                                    "meeting_id": {"type": "string"},
+                                    "summary": {"type": "string"},
+                                    "why": {"type": "string"}
+                                },
+                                "required": ["url", "summary"]
+                            }
+                        }
+                    },
+                    "required": ["items"],
+                    "additionalProperties": False
+                }
+            }
+            messages = [
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": json.dumps(user_payload)}
+            ]
+            try:
+                resp = await self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    temperature=0.2,
+                    response_format={"type": "json_schema", "json_schema": schema},
+                    max_tokens=400,
+                )
+                content = resp.choices[0].message.content or "{}"
+                data = json.loads(content)
+            except Exception:
+                # fallback without json mode
+                resp = await self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    temperature=0.2,
+                    max_tokens=400,
+                )
+                txt = resp.choices[0].message.content or ""
+                # naive parse: pick lines containing http
+                items = []
+                for s in txt.splitlines():
+                    if "http" in s:
+                        items.append({"url": s.strip(), "summary": "Relevant to answer", "why": "Supports key details"})
+                data = {"items": items[:top_k]}
+            items = data.get("items") or []
+            # enrich meeting fields from given sources
+            by_url = {s.get("url"): s for s in sources if s.get("url")}
+            out: List[Dict[str, Any]] = []
+            for it in items[:top_k]:
+                url = it.get("url")
+                src = by_url.get(url, {})
+                out.append({
+                    "url": url,
+                    "meeting_type": it.get("meeting_type") or src.get("meeting_type"),
+                    "meeting_date": it.get("meeting_date") or src.get("meeting_date"),
+                    "meeting_id": it.get("meeting_id") or src.get("meeting_id"),
+                    "summary": it.get("summary") or "Relevant to citizens",
+                    "why": it.get("why") or "Supports details used in the answer",
+                })
+            return out
+        except Exception as e:
+            logger.warning(f"explain_and_rerank failed: {e}")
             return []
 
 # Pydantic models for API
@@ -2846,61 +2939,89 @@ async def search(req: Request, request: SearchRequest):
             # Build answer_bullets mapping each citation to a short supporting excerpt
             answer_bullets: List[Dict[str, Any]] = []
             try:
-                # Simple map url->vector result
-                url_to_vec = {}
-                for vr in vector_results:
-                    u = vr.get("url")
-                    if u and u not in url_to_vec:
-                        url_to_vec[u] = vr
-                # Build quick meeting_id set from graph results for linkage hints
-                graph_meeting_ids = set()
-                for gr in (graph_results or []):
-                    mid = gr.get("meeting_id") or (gr.get("agenda_item", {}) if isinstance(gr.get("agenda_item"), dict) else {}).get("meeting_id")
-                    if mid:
-                        graph_meeting_ids.add(str(mid))
-                # Pick significant tokens from query to guide snippet selection
-                import re as _re
-                sig_toks = [t for t in _re.findall(r"[a-zA-Z0-9]+", (q or '').lower()) if len(t) > 3]
-                for cit in citations[:5]:
-                    u = cit.get("url")
-                    vr = url_to_vec.get(u)
-                    snippet = None
-                    overlap_tokens: List[str] = []
-                    if vr and isinstance(vr.get("content"), str):
-                        text = vr["content"]
-                        low = text.lower()
-                        # Try to find a window around the first matching token
-                        idx = -1
-                        for t in sig_toks:
-                            idx = low.find(t)
+                # Always run explanation/rerank to produce citizen-friendly bullets
+                if vector_results:
+                    # prepare up to 20 sources with compact context
+                    srcs = []
+                    for vr in (vector_results[: min(20, len(vector_results))]):
+                        srcs.append({
+                            "title": vr.get("title"),
+                            "meeting_type": vr.get("meeting_type"),
+                            "meeting_date": vr.get("meeting_date"),
+                            "url": vr.get("url"),
+                            "excerpt": (vr.get("content") or "")[:300]
+                        })
+                    try:
+                        explain = await self._explain_and_rerank_sources(q, answer_text or "", srcs, top_k=min(5, len(citations)))
+                        if isinstance(explain, list) and explain:
+                            for e in explain:
+                                answer_bullets.append({
+                                    "text": (e.get("summary") or ""),
+                                    "why": (e.get("why") or ""),
+                                    "url": e.get("url"),
+                                    "meeting_id": e.get("meeting_id"),
+                                    "meeting_date": e.get("meeting_date"),
+                                    "meeting_type": e.get("meeting_type"),
+                                })
+                    except Exception:
+                        pass
+                if not answer_bullets:
+                    # Simple map url->vector result
+                    url_to_vec = {}
+                    for vr in vector_results:
+                        u = vr.get("url")
+                        if u and u not in url_to_vec:
+                            url_to_vec[u] = vr
+                    # Build quick meeting_id set from graph results for linkage hints
+                    graph_meeting_ids = set()
+                    for gr in (graph_results or []):
+                        mid = gr.get("meeting_id") or (gr.get("agenda_item", {}) if isinstance(gr.get("agenda_item"), dict) else {}).get("meeting_id")
+                        if mid:
+                            graph_meeting_ids.add(str(mid))
+                    # Pick significant tokens from query to guide snippet selection
+                    import re as _re
+                    sig_toks = [t for t in _re.findall(r"[a-zA-Z0-9]+", (q or '').lower()) if len(t) > 3]
+                    for cit in citations[:5]:
+                        u = cit.get("url")
+                        vr = url_to_vec.get(u)
+                        snippet = None
+                        overlap_tokens: List[str] = []
+                        if vr and isinstance(vr.get("content"), str):
+                            text = vr["content"]
+                            low = text.lower()
+                            # Try to find a window around the first matching token
+                            idx = -1
+                            for t in sig_toks:
+                                idx = low.find(t)
+                                if idx >= 0:
+                                    break
                             if idx >= 0:
-                                break
-                        if idx >= 0:
-                            start = max(0, idx - 80)
-                            end = min(len(text), idx + 200)
-                            snippet = text[start:end].strip()
-                        else:
-                            snippet = text[:220].strip()
-                        # Compute basic token overlap
-                        overlap_tokens = [t for t in sig_toks if low.find(t) >= 0][:3]
-                    # Build concise rationale
-                    rationale_bits: List[str] = []
-                    rationale_bits.append("high semantic similarity")
-                    if overlap_tokens:
-                        rationale_bits.append("mentions: " + ", ".join(overlap_tokens))
-                    if cit.get("meeting_date"):
-                        rationale_bits.append(f"meeting date {cit.get('meeting_date')}")
-                    mid_str = cit.get("meeting_id") and str(cit.get("meeting_id")) or None
-                    if mid_str and mid_str in graph_meeting_ids:
-                        rationale_bits.append("linked via graph")
-                    rationale = "; ".join(rationale_bits)
-                    answer_bullets.append({
-                        "text": (snippet or ""),
-                        "why": rationale,
-                        "url": u,
-                        "meeting_id": cit.get("meeting_id"),
-                        "meeting_date": cit.get("meeting_date"),
-                    })
+                                start = max(0, idx - 80)
+                                end = min(len(text), idx + 200)
+                                snippet = text[start:end].strip()
+                            else:
+                                snippet = text[:220].strip()
+                            # Compute basic token overlap
+                            overlap_tokens = [t for t in sig_toks if low.find(t) >= 0][:3]
+                        # Build concise rationale
+                        rationale_bits: List[str] = []
+                        # keep citizen-friendly rationale only
+                        if overlap_tokens:
+                            rationale_bits.append("mentions: " + ", ".join(overlap_tokens))
+                        if cit.get("meeting_date"):
+                            rationale_bits.append(f"meeting date {cit.get('meeting_date')}")
+                        mid_str = cit.get("meeting_id") and str(cit.get("meeting_id")) or None
+                        if mid_str and mid_str in graph_meeting_ids:
+                            rationale_bits.append("linked via graph")
+                        rationale = "; ".join(rationale_bits)
+                        answer_bullets.append({
+                            "text": (snippet or ""),
+                            "why": rationale,
+                            "url": u,
+                            "meeting_id": cit.get("meeting_id"),
+                            "meeting_date": cit.get("meeting_date"),
+                            "meeting_type": cit.get("meeting_type"),
+                        })
             except Exception:
                 answer_bullets = []
             combined = {"answer": answer_text, "source_citations": citations, "answer_bullets": answer_bullets}
