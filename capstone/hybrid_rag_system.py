@@ -2460,31 +2460,79 @@ class HybridRAGSystem:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             }
-            statement = (
-                "MATCH (a:AgendaItem) "
-                "WHERE toLower(a.title) CONTAINS toLower($q) "
-                "   OR toLower(a.description) CONTAINS toLower($q) "
-                "   OR toLower(a.summary) CONTAINS toLower($q) "
-                "RETURN a.title AS title, a.description AS content, a.meeting_id AS meeting_id, "
-                "       a.meeting_date AS meeting_date, a.item_id AS item_id "
-                "LIMIT $k"
-            )
-            payload = {"statement": statement, "parameters": {"q": query_text, "k": int(top_k)}}
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.post(api_url, json=payload, headers=headers)
-                logger.debug(f"Neo4j status={resp.status_code}")
-                if resp.status_code not in (200, 202):
-                    logger.error(f"Neo4j non-success status={resp.status_code}")
-                    return []
-                body = resp.json() or {}
-            logger.debug(f"Neo4j body keys={list(body.keys())}")
-            # Parse results
+            # Prepare multiple strategies
+            import re as _re
+            tokens = [t for t in _re.findall(r"[a-zA-Z0-9]+", (query_text or "").lower()) if len(t) > 2]
+            year_match = _re.search(r"\b(20\d{2})\b", query_text or "")
+            year = year_match.group(1) if year_match else None
+            where_year = " AND a.meeting_date STARTS WITH $year" if year else ""
+            strategies: List[Tuple[str, str, Dict[str, Any]]] = []
+            # Strategy 1: direct contains on agenda fields
+            strategies.append((
+                "contains_agenda",
+                " ".join([
+                    "MATCH (a:AgendaItem)",
+                    "WHERE toLower(a.title) CONTAINS toLower($q)",
+                    "   OR toLower(a.description) CONTAINS toLower($q)",
+                    "   OR toLower(a.summary) CONTAINS toLower($q)",
+                    f"{where_year}",
+                    "RETURN a.title AS title, a.description AS content, a.meeting_id AS meeting_id,",
+                    "       a.meeting_date AS meeting_date, a.item_id AS item_id",
+                    "LIMIT $k",
+                ]),
+                {"q": query_text, "k": int(top_k), **({"year": year} if year else {})}
+            ))
+            # Strategy 2: any-token contains on agenda fields
+            strategies.append((
+                "any_token_agenda",
+                " ".join([
+                    "MATCH (a:AgendaItem)",
+                    "WHERE any(t IN $tokens WHERE toLower(a.title) CONTAINS t OR toLower(a.description) CONTAINS t OR toLower(a.summary) CONTAINS t)",
+                    f"{where_year}",
+                    "RETURN a.title AS title, a.description AS content, a.meeting_id AS meeting_id,",
+                    "       a.meeting_date AS meeting_date, a.item_id AS item_id",
+                    "LIMIT $k",
+                ]),
+                {"tokens": tokens, "k": int(top_k), **({"year": year} if year else {})}
+            ))
+            # Strategy 3: meeting title join (sometimes queries hit meeting titles)
+            where_year_m = " AND a.meeting_date STARTS WITH $year" if year else ""
+            strategies.append((
+                "meeting_title_join",
+                " ".join([
+                    "MATCH (m:Meeting)-[:HAS_AGENDA_ITEM]->(a:AgendaItem)",
+                    "WHERE toLower(m.title) CONTAINS toLower($q) OR any(t IN $tokens WHERE toLower(m.title) CONTAINS t)",
+                    f"{where_year_m}",
+                    "RETURN a.title AS title, a.description AS content, a.meeting_id AS meeting_id,",
+                    "       a.meeting_date AS meeting_date, a.item_id AS item_id",
+                    "LIMIT $k",
+                ]),
+                {"q": query_text, "tokens": tokens, "k": int(top_k), **({"year": year} if year else {})}
+            ))
+
             rows: List[List[Any]] = []
-            if isinstance(body.get("data"), dict):
-                rows = body["data"].get("values") or []
-            elif isinstance(body.get("data"), list):
-                rows = body["data"]
-            logger.info(f"Neo4j rows={len(rows)}")
+            body: Dict[str, Any] = {}
+            used_strategy = None
+            async with httpx.AsyncClient(timeout=20) as client:
+                for name, stmt, params in strategies:
+                    payload = {"statement": stmt, "parameters": params}
+                    resp = await client.post(api_url, json=payload, headers=headers)
+                    logger.debug(f"Neo4j status={resp.status_code} strategy={name}")
+                    if resp.status_code not in (200, 202):
+                        logger.error(f"Neo4j non-success status={resp.status_code} strategy={name}")
+                        continue
+                    body = resp.json() or {}
+                    # Parse rows
+                    if isinstance(body.get("data"), dict):
+                        rows = body["data"].get("values") or []
+                    elif isinstance(body.get("data"), list):
+                        rows = body["data"]
+                    logger.info(f"Neo4j rows={len(rows)} strategy={name}")
+                    if rows:
+                        used_strategy = name
+                        break
+            if not rows:
+                return []
             results: List[Dict[str, Any]] = []
             for row in rows:
                 try:
