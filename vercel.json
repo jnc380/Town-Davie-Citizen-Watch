@@ -3,9 +3,7 @@
   "functions": {
     "api/index.py": {
       "runtime": "vercel-python@3.11",
-      "includeFiles": [
-        "capstone/templates/**"
-      ]
+      "includeFiles": "capstone/templates/**"
     }
   },
   "routes": [
