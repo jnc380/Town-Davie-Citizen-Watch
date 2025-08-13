@@ -853,7 +853,7 @@ class HybridRAGSystem:
                     query_embedding = await self.get_embedding(query)
 
                 # Remote calls
-                vector_results = await self._zilliz_search(query_embedding, top_k * 2)
+                vector_results = await self._zilliz_search(query_embedding, top_k * 2, expr)
                 # Prefer Neo4j Query API if configured; else leave graph empty
                 graph_results = await self._neo4j_query_api_search(query, top_k)
 
@@ -2225,7 +2225,7 @@ class HybridRAGSystem:
             })
         return combined
 
-    async def _zilliz_search(self, query_embedding: List[float], top_k: int) -> List[Dict[str, Any]]:
+    async def _zilliz_search(self, query_embedding: List[float], top_k: int, expr: Optional[str] = None) -> List[Dict[str, Any]]:
         """Search Zilliz/Milvus over HTTPS using the VectorDB REST API.
         Requires MILVUS_URI, MILVUS_TOKEN, and self.collection_name.
         """
@@ -2242,14 +2242,18 @@ class HybridRAGSystem:
                 "Authorization": "Bearer ****",  # redacted
                 "Content-Type": "application/json",
             }
+            vector_field = os.getenv("MILVUS_VECTOR_FIELD", "embedding")
             payload = {
                 "collectionName": self.collection_name,
                 "data": [query_embedding],
                 "limit": int(top_k),
                 "outputFields": ["text", "metadata", "meeting_id", "meeting_date", "chunk_id", "title"],
+                "annsField": vector_field,
             }
+            if expr:
+                payload["filter"] = expr
             logger.info(
-                f"Zilliz search host={_host_only(milvus_uri)} collection={self.collection_name} k={top_k}"
+                f"Zilliz search host={_host_only(milvus_uri)} collection={self.collection_name} field={vector_field} k={top_k} expr={'set' if expr else 'unset'}"
             )
             if httpx is None:
                 logger.warning("httpx not available; cannot call Zilliz HTTP API")
@@ -2570,25 +2574,27 @@ async def search(req: Request, request: SearchRequest):
         t_hybrid_ms = int((time.time() - t_hybrid_start) * 1000)
         logger.info(f"/api/search hybrid_ms={t_hybrid_ms} vec={len(results.get('vector_results') or [])} graph={len(results.get('graph_results') or [])}")
  
-        combined = results.get("combined_results", {})
-        vector_sources = combined.get("vector_sources") or results.get("vector_results") or []
-        graph_sources = combined.get("graph_sources") or results.get("graph_results") or []
-        total_sources = combined.get("total_sources") or (len(vector_sources) + len(graph_sources))
-
-        # If combined is a list (from lightweight _synthesize_answer), build answer and citations
+        combined = results.get("combined_results")
+        # Normalize combined: may be list (light mode) or dict (full mode)
         if isinstance(combined, list):
-            top_texts = [c.get("content") for c in combined if c.get("content")] 
+            top_texts = [c.get("content") for c in combined if isinstance(c, dict) and c.get("content")]
             answer_text = "\n\n".join(top_texts[:2]) or "I couldn't find relevant information."
             citations = []
             for c in combined[:5]:
-                citations.append({
-                    "title": c.get("title"),
-                    "url": c.get("url"),
-                    "meeting_id": c.get("meeting_id"),
-                    "meeting_date": c.get("meeting_date"),
-                    "type": c.get("type", "document"),
-                })
+                if isinstance(c, dict):
+                    citations.append({
+                        "title": c.get("title"),
+                        "url": c.get("url"),
+                        "meeting_id": c.get("meeting_id"),
+                        "meeting_date": c.get("meeting_date"),
+                        "type": c.get("type", "document"),
+                    })
             combined = {"answer": answer_text, "source_citations": citations}
+        elif not isinstance(combined, dict):
+            combined = {}
+        vector_sources = combined.get("vector_sources") or results.get("vector_results") or []
+        graph_sources = combined.get("graph_sources") or results.get("graph_results") or []
+        total_sources = combined.get("total_sources") or (len(vector_sources) + len(graph_sources))
 
         # No-results fallback
         if not vector_sources and not graph_sources:
