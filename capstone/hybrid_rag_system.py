@@ -2827,13 +2827,17 @@ async def index(request: Request):
                 if (bullets.length){
                   const wrap = document.createElement('div');
                   wrap.className='mt-2 text-sm text-gray-700 bg-white border rounded p-3';
-                  wrap.innerHTML = '<div class="font-semibold mb-1">Why these sources?</div>' +
+                  wrap.innerHTML = '<div class="font-semibold mb-1">The publicly available sources used to make this answer</div>' +
                     bullets.map((b,i)=>{
-                      const tail = [b.meeting_id, b.meeting_date].filter(Boolean).join(' • ');
-                      const excerpt = (b.text||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                      const tail = [b.meeting_type, b.meeting_date].filter(Boolean).join(' • ');
+                      const summary = (b.summary||'').trim();
+                      const why = (b.why||'').trim();
+                      const s1 = summary ? (summary.endsWith('.')? summary : summary + '.') : '';
+                      const s2 = why ? (why.endsWith('.')? why : why + '.') : '';
+                      const blurb = (s1 + ' ' + s2).trim();
                       const url = b.url||'#';
-                      const why = (b.why||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-                      return `<div class="mb-2">${i+1}. <a class="text-blue-700 underline" href="${url}" target="_blank" rel="noopener">click here</a> <span class="text-gray-500">${tail?('('+tail+')'):''}</span><div class="text-gray-600">${why}${excerpt?(' — '+excerpt):''}</div></div>`
+                      const blurbEsc = blurb.replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                      return `<div class=\"mb-2\">${i+1}. <a class=\"text-blue-700 underline\" href=\"${url}\" target=\"_blank\" rel=\"noopener\"><i class=\"fa-solid fa-arrow-up-right-from-square mr-1\"></i>Click</a> <span class=\"text-gray-500\">${tail?('('+tail+')'):''}</span><div class=\"text-gray-600\">${blurbEsc}</div></div>`
                     }).join('');
                   box.appendChild(wrap);
                 } else {
@@ -3005,17 +3009,17 @@ async def search(req: Request, request: SearchRequest):
                             overlap_tokens = [t for t in sig_toks if low.find(t) >= 0][:3]
                         # Build concise rationale
                         rationale_bits: List[str] = []
-                        # keep citizen-friendly rationale only
-                        if overlap_tokens:
-                            rationale_bits.append("mentions: " + ", ".join(overlap_tokens))
+                        # Citizen-friendly, no technical terms or excerpts
+                        if cit.get("meeting_type"):
+                            rationale_bits.append(str(cit.get("meeting_type")))
                         if cit.get("meeting_date"):
-                            rationale_bits.append(f"meeting date {cit.get('meeting_date')}")
+                            rationale_bits.append(str(cit.get("meeting_date")))
                         mid_str = cit.get("meeting_id") and str(cit.get("meeting_id")) or None
                         if mid_str and mid_str in graph_meeting_ids:
-                            rationale_bits.append("linked via graph")
-                        rationale = "; ".join(rationale_bits)
+                            rationale_bits.append("supports related agenda item")
+                        rationale = "; ".join([b for b in rationale_bits if b]) or "supports the answer"
                         answer_bullets.append({
-                            "text": (snippet or ""),
+                            "text": "",  # no raw excerpt in fallback
                             "why": rationale,
                             "url": u,
                             "meeting_id": cit.get("meeting_id"),
