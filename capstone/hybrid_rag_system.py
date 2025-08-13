@@ -2710,8 +2710,15 @@ async def search(req: Request, request: SearchRequest):
         combined = results.get("combined_results")
         # Normalize combined: may be list (light mode) or dict (full mode)
         if isinstance(combined, list):
-            top_texts = [c.get("content") for c in combined if isinstance(c, dict) and c.get("content")]
-            answer_text = "\n\n".join(top_texts[:2]) or "I couldn't find relevant information."
+            # Use LLM summarizer to produce a concise 1–2 paragraph answer from vector+graph results
+            vector_results = results.get("vector_results") or []
+            graph_results = results.get("graph_results") or []
+            year_scope = str(getattr(rag_system, "year_filter", "")) or None
+            try:
+                final_json = await rag_system._final_summarize_with_gpt(q, vector_results, graph_results, year_scope, prior_context)
+            except Exception:
+                final_json = None
+            # Build citations from top combined items
             citations = []
             for c in combined[:5]:
                 if isinstance(c, dict):
@@ -2722,6 +2729,11 @@ async def search(req: Request, request: SearchRequest):
                         "meeting_date": c.get("meeting_date"),
                         "type": c.get("type", "document"),
                     })
+            answer_text = (final_json or {}).get("answer_paragraph") if isinstance(final_json, dict) else None
+            if not answer_text:
+                # Fallback to brief snippet join
+                top_texts = [c.get("content") for c in combined if isinstance(c, dict) and c.get("content")]
+                answer_text = "\n\n".join(top_texts[:2]) or "I couldn't find relevant information."
             combined = {"answer": answer_text, "source_citations": citations}
         elif not isinstance(combined, dict):
             combined = {}
