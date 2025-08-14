@@ -789,10 +789,8 @@ class HybridRAGSystem:
         combined.sort(key=lambda x: x.get("fused_score", 0), reverse=True)
         return combined[:top_k]
     
-    async def hybrid_search(self, query: str, top_k: int = 10, prior_context: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-        """
-        Perform hybrid search combining vector similarity with graph relationships
-        """
+    async def hybrid_search(self, query: str, top_k: int = 5, prior_context: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """Perform hybrid search combining vector and graph results."""
         try:
             # Route query
             route = self._classify_query(query)
@@ -1222,206 +1220,54 @@ class HybridRAGSystem:
             items_sorted = sorted(items, key=lambda x: x.get("fused_score", 0), reverse=True)
             return items_sorted[:top_k]
  
-    async def _final_summarize_with_gpt(
-        self,
-        query: str,
-        vector_results: List[Dict[str, Any]],
-        graph_results: List[Dict[str, Any]],
-        year_scope: Optional[str] = None,
-        prior_context: Optional[List[Dict[str, Any]]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Generate concise, grounded 1–2 paragraph answer with citations from retrieved context.
-        Returns dict with keys: answer_paragraph (str), citations (list[str]).
-        """
+    async def _final_summarize_with_gpt(self, question: str, sources: List[Dict[str, Any]], top_k: int = 5) -> str:
+        """Final summarization with GPT to produce a concise answer paragraph."""
         try:
-            # Prepare compact context
-            def _diverse_vectors(candidates: List[Dict[str, Any]], k: int) -> List[Dict[str, Any]]:
-                selected: List[Dict[str, Any]] = []
-                per_meeting_cap = 2
-                meeting_counts: Dict[str, int] = {}
-                for c in candidates:
-                    mid = str(c.get("meeting_id") or (c.get("metadata") or {}).get("meeting_id") or "")
-                    if mid:
-                        if meeting_counts.get(mid, 0) >= per_meeting_cap:
-                            continue
-                    # avoid transcript segments that are too close in time
-                    ok = True
-                    if c.get("chunk_type") == "youtube_transcript" and selected:
-                        st = float(c.get("start_time") or 0)
-                        for s in selected:
-                            if s.get("chunk_type") == "youtube_transcript" and str(s.get("meeting_id")) == mid:
-                                st2 = float(s.get("start_time") or 0)
-                                if abs(st - st2) < 60:
-                                    ok = False
-                                    break
-                    if not ok:
-                        continue
-                    selected.append(c)
-                    if mid:
-                        meeting_counts[mid] = meeting_counts.get(mid, 0) + 1
-                    if len(selected) >= k:
-                        break
-                return selected
-
-            kv = getattr(self, "context_vector_snippets", 6)
-            kg = getattr(self, "context_agenda_items", 6)
-            # Consider first 2x candidates to improve diversity window
-            vec_pool = vector_results[: max(kv * 2, 8)]
-            vec_diverse = _diverse_vectors(vec_pool, kv)
-            # Attempt neighbor inclusion for transcripts if room remains
-            if len(vec_diverse) < kv:
-                need = kv - len(vec_diverse)
-                have_ids = {v.get("chunk_id") for v in vec_diverse}
-                # simple neighbor: same meeting, adjacent chunk_index if available in pool
-                for v in vec_pool:
-                    if need <= 0:
-                        break
-                    if v.get("chunk_type") != "youtube_transcript":
-                        continue
-                    cid = v.get("chunk_id")
-                    if cid in have_ids:
-                        continue
-                    mid = v.get("meeting_id") or (v.get("metadata") or {}).get("meeting_id")
-                    idx = (v.get("metadata") or {}).get("chunk_index")
-                    if mid and isinstance(idx, int):
-                        # look for someone already selected with adjacent index
-                        for s in vec_diverse:
-                            if s.get("chunk_type") == "youtube_transcript" and (s.get("meeting_id") or (s.get("metadata") or {}).get("meeting_id")) == mid:
-                                sidx = (s.get("metadata") or {}).get("chunk_index")
-                                if isinstance(sidx, int) and abs(sidx - idx) == 1:
-                                    vec_diverse.append(v)
-                                    have_ids.add(cid)
-                                    need -= 1
-                                    break
-
-            snippets = []
-            for v in vec_diverse:
-                text = (v.get("content") or "").strip()
-                if len(text) > 250:
-                    text = text[:250] + "..."
-                url = v.get("url") or v.get("metadata", {}).get("url") or ""
-                snippets.append({
-                    "text": text,
-                    "url": url,
-                    "date": v.get("meeting_date", ""),
-                    "type": v.get("chunk_type", "")
-                })
-            agenda = []
-            # Lightweight amount/outcome extraction for summary context
-            def _amts(t: str) -> List[str]:
-                if not t:
-                    return []
-                vals = re.findall(r"\$\d[\d,]*(?:\.\d{1,2})?|\$\d+(?:\.\d+)?\s*(?:m|million)\b", t, flags=re.IGNORECASE)
-                # dedupe order preserving
-                out, seen = [], set()
-                for a in vals:
-                    k = a.lower()
-                    if k not in seen:
-                        seen.add(k)
-                        out.append(a)
-                return out
-            def _outcome(t: str) -> Optional[str]:
-                if not t:
-                    return None
-                tl = t.lower()
-                for k,v in [("approved","Approved"),("adopted","Adopted"),("passed","Passed"),("denied","Denied"),("tabled","Tabled")]:
-                    if k in tl:
-                        return v
-                return None
-            for g in graph_results[:kg]:
-                ai = g.get("agenda_item", {})
-                desc = ai.get("description", "") or ""
-                title = ai.get("title", "")[:160]
-                url = ai.get("url", "")
-                amounts = _amts(title + " " + desc)
-                outcome = _outcome(desc)
-                agenda.append({
-                    "title": title,
-                    "url": url,
-                    "amounts": amounts,
-                    "outcome": outcome,
-                })
-
+            if not sources:
+                return "No relevant information found in the available sources."
+            
+            # Prepare context from top sources
+            context_parts = []
+            for i, source in enumerate(sources[:top_k], 1):
+                excerpt = source.get("excerpt", "")
+                meeting_type = source.get("meeting_type", "")
+                meeting_date = source.get("meeting_date", "")
+                if excerpt:
+                    context_parts.append(f"Source {i} ({meeting_type} - {meeting_date}): {excerpt}")
+            
+            context = "\n\n".join(context_parts)
+            
             system = (
                 "You are a civic information assistant summarizing Town of Davie agendas and meeting transcripts for citizens. "
-                "Audience: average resident. Use ONLY the provided context (agenda cover sheets, minutes/transcripts). No outside knowledge. "
-                "If the question is out of scope for the current index/year, return exactly: 'No indexed data for the current scope.' "
-                "Style: 1–2 short paragraphs, plain English, citizen‑friendly, no boilerplate, no long quoted text. "
-                "Ground strictly in the context; mention amounts/outcomes/dates ONLY if present; concise and factual. "
-                "Jurisdiction: Town of Davie only. Return JSON only per the given schema."
+                "Audience: average resident. Use ONLY the provided context. No outside knowledge. "
+                "CRITICAL: Only answer if the sources actually contain information directly relevant to the specific question. "
+                "If the sources are about different topics (e.g., sources about horse sculptures when asked about Pine Island Road), "
+                "return exactly: 'No relevant information found in the available sources.' "
+                "Do not make connections between unrelated topics. "
+                "Write a clear, concise answer in 1-2 paragraphs. Focus on specific decisions, dates, locations, and amounts mentioned. "
+                "Use simple language. Avoid jargon. Do not make up information not present in the context."
             )
-            # Compact prior context (last few turns)
-            convo = []
-            if prior_context:
-                for t in prior_context[-3:]:
-                    convo.append({
-                        "question": t.get("question", ""),
-                        "answer": (t.get("answer", "") or "")[:400],
-                        "citations": t.get("citations", [])
-                    })
-
-            user_payload = {
-                "query": query,
-                "year_scope": year_scope,
-                "context_snippets": snippets,
-                "agenda_items": agenda,
-                "conversation_context": convo or [],
-            }
+            
+            user_msg = f"Question: {question}\n\nContext:\n{context}\n\nAnswer:"
+            
             messages = [
                 {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(user_payload)}
+                {"role": "user", "content": user_msg}
             ]
-            # JSON schema for structured output
-            schema = {
-                "name": "summarize_civic_context",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "answer_paragraph": {
-                            "type": "string",
-                            "description": "1–2 short paragraphs, plain English, citizen‑friendly, grounded strictly in the provided context. Mention amounts/outcomes only if present. If out of scope for the current index/year, return exactly: 'No indexed data for the current scope.'"
-                        },
-                        "citations": {
-                            "type": "array",
-                            "description": "Array of URLs to agenda cover sheets, minutes, or transcripts that support the answer (Town of Davie only).",
-                            "items": {"type": "string", "format": "uri"}
-                        }
-                    },
-                    "required": ["answer_paragraph", "citations"],
-                    "additionalProperties": False
-                }
-            }
-            def _response_format():
-                if getattr(self, "use_json_schema", False):
-                    return {"type": "json_schema", "json_schema": schema}
-                return {"type": "json_object"}
-            try:
-                resp = await self.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=messages,
-                    temperature=0.2,
-                    response_format=_response_format(),
-                    max_tokens=getattr(self, "final_max_tokens", 220),
-                )
-                content = resp.choices[0].message.content or "{}"
-                return json.loads(content)
-            except Exception as e:
-                logger.warning(f"Final synthesis JSON mode failed: {e}")
-                # Retry without json mode
-                resp = await self.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=messages,
-                    temperature=0.2,
-                    max_tokens=getattr(self, "final_max_tokens", 220),
-                )
-                content = resp.choices[0].message.content or ""
-                # Build best-effort paragraph from content
-                para = " ".join([ln.strip() for ln in content.splitlines() if ln.strip()])
-                # Trim to ~2 short paragraphs
-                return {"answer_paragraph": para[:900], "citations": re.findall(r"https?://\S+", content)[:5]}
+            
+            resp = await self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.2,
+                max_tokens=400,
+            )
+            
+            answer = resp.choices[0].message.content or "No answer generated."
+            return answer.strip()
+            
         except Exception as e:
-            logger.warning(f"Final synthesis failed: {e}")
-            return None
+            logger.warning(f"Final summarization failed: {e}")
+            return "Error generating answer. Please try again."
 
     async def _combine_results(self, query: str, vector_results: List[Dict], graph_results: List[Dict], prior_context: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """Combine and analyze vector and graph results with source citations"""
@@ -2578,12 +2424,15 @@ class HybridRAGSystem:
                 logger.info(f"Source {i}: url={s.get('url', 'NO URL')} excerpt_len={len(s.get('excerpt', ''))} excerpt_preview={s.get('excerpt', 'NO EXCERPT')[:100]}")
             # Answer-aware prompt: extract answer facts, score sources by support, return citizen-friendly blurbs with evidence
             sys_msg = (
-                "You are a civic information assistant. Your job is to explain why each source is relevant to the specific answer given."
-                " DO NOT repeat the full resolution title. Instead, write concise, citizen-friendly explanations."
-                " For each source, identify the specific action or detail and explain:"
-                " (1) What specific action this source shows (e.g., 'This meeting approved the interlocal agreement with Broward County' or 'This document specifies the roadway segment from SW 36 Street to Nova Drive' or 'This shows the $500,000 budget allocation')"
-                " (2) Why this specific action matters for the question (e.g., 'This shows the council's approval of the project' or 'This confirms the exact location boundaries' or 'This reveals the funding amount')"
-                " Include a short verbatim quote from the source that contains the key detail. Score 0-5 based on how directly the source supports the answer facts."
+                "You are a civic information assistant. Your job is to explain why each source is relevant to the specific question asked."
+                " CRITICAL: Only include sources that are actually relevant to the question. "
+                "If a source is about a completely different topic (e.g., horse sculptures when asked about Pine Island Road), "
+                "do not include it in your response or give it a very low score (0-1). "
+                "DO NOT repeat the full resolution title. Instead, write concise, citizen-friendly explanations."
+                " For each relevant source, identify the specific action or detail and explain:"
+                " (1) What specific action this source shows (e.g., 'This meeting approved the interlocal agreement with Broward County' or 'This document specifies the roadway segment from SW 36 Street to Nova Drive')"
+                " (2) Why this specific action matters for the question (e.g., 'This shows the council's approval of the project' or 'This confirms the exact location boundaries')"
+                " Include a short verbatim quote from the source that contains the supporting detail. Score 0-5 based on how directly the source supports the question."
                 " Be specific about: approval decisions, exact locations, dollar amounts, dates, and specific actions mentioned in the source."
                 " Write in simple language that citizens can understand. Keep summaries under 100 characters."
                 " Output must be valid JSON with this shape only: {\"items\":[{\"url\":string,\"meeting_type\":string,\"meeting_date\":string,\"meeting_id\":string,\"summary\":string,\"why\":string,\"evidence_quote\":string,\"score\":number}...]}."
@@ -2975,9 +2824,21 @@ async def search(req: Request, request: SearchRequest):
             year_scope = str(getattr(rag_system, "year_filter", "")) or None
             explain_debug = None
             try:
-                final_json = await rag_system._final_summarize_with_gpt(q, vector_results, graph_results, year_scope, prior_context)
+                # Prepare sources for summarization
+                combined_sources = []
+                for vr in vector_results:
+                    combined_sources.append({
+                        "excerpt": vr.get("content", ""),
+                        "meeting_type": vr.get("meeting_type"),
+                        "meeting_date": vr.get("meeting_date"),
+                        "url": vr.get("url"),
+                        "meeting_id": vr.get("meeting_id")
+                    })
+                
+                # Use new summarization with source filtering
+                answer_text = await rag_system._final_summarize_with_gpt(q, combined_sources, top_k)
             except Exception:
-                final_json = None
+                answer_text = "Error generating answer. Please try again."
             # Build citations from top combined items
             citations = []
             for c in combined[:5]:
@@ -2990,7 +2851,6 @@ async def search(req: Request, request: SearchRequest):
                         "meeting_type": c.get("meeting_type"),
                         "type": c.get("type", "document"),
                     })
-            answer_text = (final_json or {}).get("answer_paragraph") if isinstance(final_json, dict) else None
             if not answer_text:
                 # Fallback to brief snippet join
                 top_texts = [c.get("content") for c in combined if isinstance(c, dict) and c.get("content")]
