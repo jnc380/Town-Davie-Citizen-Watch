@@ -178,7 +178,7 @@ class HybridRAGSystem:
             logger.info(f"Milvus collection configured: {self.collection_name}")
         except Exception:
             pass
-        
+
         # Neo4j config (env only)
         self.neo4j_uri = os.getenv("NEO4J_URI", "")
         self.neo4j_username = os.getenv("NEO4J_USERNAME", "")
@@ -311,7 +311,6 @@ class HybridRAGSystem:
         # Sparse vectorizer removed for Vercel serverless
         self.sparse_vectorizer = None
         return
-
     
     def _setup_milvus(self):
         """Milvus setup removed on Vercel serverless."""
@@ -1344,13 +1343,12 @@ class HybridRAGSystem:
                 })
 
             system = (
-                "You are a civic QA assistant summarizing LOCAL GOVERNMENT agendas and meeting transcripts for CITIZENS. "
-                "Audience: average resident. Data: provided CONTEXT ONLY (agenda cover sheets, minutes/transcripts). No outside knowledge. "
+                "You are a civic QA assistant summarizing Town of Davie agendas and meeting transcripts for citizens. "
+                "Audience: average resident. Use ONLY the provided context (agenda cover sheets, minutes/transcripts). No outside knowledge. "
                 "If the question is out of scope for the current index/year, return exactly: 'No indexed data for the current scope.' "
                 "Style: 1–2 short paragraphs, plain English, citizen‑friendly, no boilerplate, no long quoted text. "
-                "Ground strictly in the context; mention amounts/outcomes only if present; keep it concise and factual. "
-                "Jurisdiction: restrict to the Town of Davie content only; ignore references to other cities or counties unless the context explicitly ties them to a Davie action. "
-                "Output JSON: answer_paragraph (string), citations (array of urls)."
+                "Ground strictly in the context; mention amounts/outcomes/dates ONLY if present; concise and factual. "
+                "Jurisdiction: Town of Davie only. Return JSON only per the given schema."
             )
             # Compact prior context (last few turns)
             convo = []
@@ -1381,16 +1379,15 @@ class HybridRAGSystem:
                     "properties": {
                         "answer_paragraph": {
                             "type": "string",
-                            "description": "Return only 1–2 short paragraphs in plain English, grounded strictly in the provided context. No lists, no HTML, no raw pasted source text. Mention amounts/outcomes/dates/companies/vendors/council members when applicable. If out of scope for the current YEAR_FILTER, return exactly: 'No indexed data for the current scope.'"
+                            "description": "1–2 short paragraphs, plain English, citizen‑friendly, grounded strictly in the provided context. Mention amounts/outcomes only if present. If out of scope for the current index/year, return exactly: 'No indexed data for the current scope.'"
                         },
                         "citations": {
                             "type": "array",
-                            "description": "URLs to agenda cover sheets, minutes, or transcripts that support the answer. Jurisdiction restricted to Town of Davie.",
-                            "items": {"type": "string", "format": "uri"},
-                            "minItems": 0
+                            "description": "Array of URLs to agenda cover sheets, minutes, or transcripts that support the answer (Town of Davie only).",
+                            "items": {"type": "string", "format": "uri"}
                         }
                     },
-                    "required": ["answer_paragraph"],
+                    "required": ["answer_paragraph", "citations"],
                     "additionalProperties": False
                 }
             }
@@ -2570,13 +2567,18 @@ class HybridRAGSystem:
             return []
 
     async def _explain_and_rerank_sources(self, question: str, final_answer: str, sources: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
+        # Precompute debug payload so we can return it even on failure
+        debug_payload = {"question": question, "final_answer": final_answer, "sources": sources[: max(1, int(top_k))]}
         try:
             if not sources:
-                return []
-            # Construct a compact prompt that asks for citizen-friendly explanations and reranking
+                return {"items": [], "debug": debug_payload}
+            # Answer-aware prompt: extract answer facts, score sources by support, return citizen-friendly blurbs with evidence
             sys_msg = (
-                "You are a civic information assistant. Given a question, the assistant's final answer, and a set of supporting sources (title, meeting_type, meeting_date, url, short excerpt), "
-                "produce a brief list of the top N sources with for each: a one-sentence summary for citizens explaining why this source supports the answer, and a simple why string (no jargon)."
+                "You are a civic information assistant for residents. First, read the user's question and the assistant's final answer."
+                " Extract 2–5 concrete answer facts (e.g., decision taken, roadway segment, dates). Then rank the provided sources by how well they support those facts."
+                " For each of the top N sources, produce exactly two short sentences for citizens:"
+                " (1) a summary of what this source contributes to the answer, and (2) why that contribution matters for the question."
+                " Include a short verbatim evidence_quote copied from the source excerpt, and a score 0–5 based on support strength. Avoid jargon."
             )
             user_payload = {
                 "question": question,
@@ -2584,7 +2586,6 @@ class HybridRAGSystem:
                 "sources": sources,
                 "top_k": max(1, int(top_k)),
             }
-            debug_payload = {"question": question, "final_answer": final_answer, "sources": sources[:top_k]}
             schema = {
                 "name": "explain_and_rerank",
                 "schema": {
@@ -2600,7 +2601,9 @@ class HybridRAGSystem:
                                     "meeting_date": {"type": "string"},
                                     "meeting_id": {"type": "string"},
                                     "summary": {"type": "string"},
-                                    "why": {"type": "string"}
+                                    "why": {"type": "string"},
+                                    "evidence_quote": {"type": "string"},
+                                    "score": {"type": "number"}
                                 },
                                 "required": ["url", "summary"]
                             }
@@ -2637,7 +2640,7 @@ class HybridRAGSystem:
                 items = []
                 for s in txt.splitlines():
                     if "http" in s:
-                        items.append({"url": s.strip(), "summary": "Relevant to answer", "why": "Supports key details"})
+                        items.append({"url": s.strip(), "summary": "Relevant to answer", "why": "Supports key details", "score": 3})
                 data = {"items": items[:top_k]}
             items = data.get("items") or []
             # enrich meeting fields from given sources
@@ -2653,11 +2656,15 @@ class HybridRAGSystem:
                     "meeting_id": it.get("meeting_id") or src.get("meeting_id"),
                     "summary": it.get("summary") or "Relevant to citizens",
                     "why": it.get("why") or "Supports details used in the answer",
+                    "evidence_quote": it.get("evidence_quote") or "",
+                    "score": it.get("score") or 0,
                 })
+            # sort by score descending
+            out.sort(key=lambda x: x.get("score", 0), reverse=True)
             return {"items": out, "debug": debug_payload}
         except Exception as e:
             logger.warning(f"explain_and_rerank failed: {e}")
-            return []
+            return {"items": [], "debug": debug_payload}
 
 # Pydantic models for API
 class SearchRequest(BaseModel):
@@ -2962,19 +2969,28 @@ async def search(req: Request, request: SearchRequest):
                             "excerpt": (vr.get("content") or "")[:300]
                         })
                     try:
-                        explain = await self._explain_and_rerank_sources(q, answer_text or "", srcs, top_k=min(5, len(citations)))
-                        if isinstance(explain, list) and explain:
-                            for e in explain:
+                        explain = await rag_system._explain_and_rerank_sources(q, answer_text or "", srcs, top_k=min(5, len(citations)))
+                        explain_debug = None
+                        items = []
+                        if isinstance(explain, dict):
+                            items = explain.get("items") or []
+                            explain_debug = explain.get("debug")
+                        elif isinstance(explain, list):
+                            items = explain
+                        if items:
+                            for e in items:
                                 answer_bullets.append({
-                                    "text": (e.get("summary") or ""),
+                                    "summary": (e.get("summary") or ""),
                                     "why": (e.get("why") or ""),
                                     "url": e.get("url"),
                                     "meeting_id": e.get("meeting_id"),
                                     "meeting_date": e.get("meeting_date"),
                                     "meeting_type": e.get("meeting_type"),
                                 })
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.exception("explain_and_rerank call failed")
+                        # preserve input for debugging in response
+                        explain_debug = {"question": q, "final_answer": answer_text or "", "sources": srcs[: min(5, len(citations))]}
                 if not answer_bullets:
                     # Simple map url->vector result
                     url_to_vec = {}
@@ -3025,7 +3041,7 @@ async def search(req: Request, request: SearchRequest):
                             rationale_bits.append("supports related agenda item")
                         rationale = "; ".join([b for b in rationale_bits if b]) or "supports the answer"
                         answer_bullets.append({
-                            "text": "",  # no raw excerpt in fallback
+                            "summary": "Relevant to the answer",
                             "why": rationale,
                             "url": u,
                             "meeting_id": cit.get("meeting_id"),
@@ -3131,17 +3147,18 @@ async def search(req: Request, request: SearchRequest):
 
         # Include session_id in a header for the client to persist
         headers = {"X-Session-Id": session_id}
-        return JSONResponse(
-            content=SearchResponse(
-                answer=combined.get("answer", ""),
-                source_citations=combined.get("source_citations", []),
-                vector_sources=vector_sources,
-                graph_sources=graph_sources,
-                total_sources=total_sources,
-                answer_bullets=combined.get("answer_bullets") or []
-            ).model_dump(),
-            headers=headers
-        )
+        payload = SearchResponse(
+            answer=combined.get("answer", ""),
+            source_citations=combined.get("source_citations", []),
+            vector_sources=vector_sources,
+            graph_sources=graph_sources,
+            total_sources=total_sources,
+            answer_bullets=combined.get("answer_bullets") or []
+        ).model_dump()
+        # Attach debug for observability if present
+        if combined.get("explain_debug"):
+            payload["explain_debug"] = combined.get("explain_debug")
+        return JSONResponse(content=payload, headers=headers)
     except HTTPException:
         raise
     except Exception as e:
