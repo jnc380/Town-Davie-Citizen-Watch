@@ -2212,6 +2212,7 @@ class HybridRAGSystem:
                 "content": c.get("content") or c.get("text") or "",
                 "meeting_id": c.get("meeting_id"),
                 "meeting_date": c.get("meeting_date"),
+                "meeting_type": c.get("meeting_type"),
                 "type": c.get("type") or c.get("chunk_type") or "document",
                 "url": c.get("url") or c.get("agenda_url"),
                 "score": c.get("score") or c.get("dense_score") or c.get("sparse_score"),
@@ -2583,6 +2584,7 @@ class HybridRAGSystem:
                 "sources": sources,
                 "top_k": max(1, int(top_k)),
             }
+            debug_payload = {"question": question, "final_answer": final_answer, "sources": sources[:top_k]}
             schema = {
                 "name": "explain_and_rerank",
                 "schema": {
@@ -2652,7 +2654,7 @@ class HybridRAGSystem:
                     "summary": it.get("summary") or "Relevant to citizens",
                     "why": it.get("why") or "Supports details used in the answer",
                 })
-            return out
+            return {"items": out, "debug": debug_payload}
         except Exception as e:
             logger.warning(f"explain_and_rerank failed: {e}")
             return []
@@ -2829,7 +2831,9 @@ async def index(request: Request):
                   wrap.className='mt-2 text-sm text-gray-700 bg-white border rounded p-3';
                   wrap.innerHTML = '<div class="font-semibold mb-1">The publicly available sources used to make this answer</div>' +
                     bullets.map((b,i)=>{
-                      const tail = [b.meeting_type, b.meeting_date].filter(Boolean).join(' • ');
+                      const mt = (b.meeting_type||'').toString();
+                      const md = (b.meeting_date||'').toString();
+                      const tail = [mt, md].filter(Boolean).join(' • ');
                       const summary = (b.summary||'').trim();
                       const why = (b.why||'').trim();
                       const s1 = summary ? (summary.endsWith('.')? summary : summary + '.') : '';
@@ -2920,6 +2924,7 @@ async def search(req: Request, request: SearchRequest):
             vector_results = results.get("vector_results") or []
             graph_results = results.get("graph_results") or []
             year_scope = str(getattr(rag_system, "year_filter", "")) or None
+            explain_debug = None
             try:
                 final_json = await rag_system._final_summarize_with_gpt(q, vector_results, graph_results, year_scope, prior_context)
             except Exception:
@@ -2933,6 +2938,7 @@ async def search(req: Request, request: SearchRequest):
                         "url": c.get("url"),
                         "meeting_id": c.get("meeting_id"),
                         "meeting_date": c.get("meeting_date"),
+                        "meeting_type": c.get("meeting_type"),
                         "type": c.get("type", "document"),
                     })
             answer_text = (final_json or {}).get("answer_paragraph") if isinstance(final_json, dict) else None
@@ -3029,6 +3035,8 @@ async def search(req: Request, request: SearchRequest):
             except Exception:
                 answer_bullets = []
             combined = {"answer": answer_text, "source_citations": citations, "answer_bullets": answer_bullets}
+            if explain_debug:
+                combined["explain_debug"] = explain_debug
         elif not isinstance(combined, dict):
             combined = {}
         vector_sources = combined.get("vector_sources") or results.get("vector_results") or []
