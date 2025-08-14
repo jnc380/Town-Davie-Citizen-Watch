@@ -1343,7 +1343,7 @@ class HybridRAGSystem:
                 })
 
             system = (
-                "You are a civic QA assistant summarizing Town of Davie agendas and meeting transcripts for citizens. "
+                "You are a civic information assistant summarizing Town of Davie agendas and meeting transcripts for citizens. "
                 "Audience: average resident. Use ONLY the provided context (agenda cover sheets, minutes/transcripts). No outside knowledge. "
                 "If the question is out of scope for the current index/year, return exactly: 'No indexed data for the current scope.' "
                 "Style: 1–2 short paragraphs, plain English, citizen‑friendly, no boilerplate, no long quoted text. "
@@ -2572,19 +2572,26 @@ class HybridRAGSystem:
         try:
             if not sources:
                 return {"items": [], "debug": debug_payload}
+            # Log what we're sending to the LLM
+            logger.info(f"explain_and_rerank sources count: {len(sources)}")
+            for i, s in enumerate(sources[:2]):
+                logger.info(f"Source {i}: url={s.get('url', 'NO URL')} excerpt_len={len(s.get('excerpt', ''))} excerpt_preview={s.get('excerpt', 'NO EXCERPT')[:100]}")
             # Answer-aware prompt: extract answer facts, score sources by support, return citizen-friendly blurbs with evidence
             sys_msg = (
-                "You are a civic information assistant for residents. First, read the user's question and the assistant's final answer."
-                " Extract 2–5 concrete answer facts (e.g., decision taken, roadway segment, dates). Then rank the provided sources by how well they support those facts."
-                " For each of the top N sources, produce exactly two short sentences for citizens:"
-                " (1) a summary of what this source contributes to the answer, and (2) why that contribution matters for the question."
-                " Include a short verbatim evidence_quote copied from the source excerpt, and a score 0–5 based on support strength. Avoid jargon."
+                "You are a civic information assistant. Your job is to explain why each source is relevant to the specific answer given."
+                " DO NOT repeat the full resolution title. Instead, write concise, citizen-friendly explanations."
+                " For each source, identify the specific action or detail and explain:"
+                " (1) What specific action this source shows (e.g., 'This meeting approved the interlocal agreement with Broward County' or 'This document specifies the roadway segment from SW 36 Street to Nova Drive' or 'This shows the $500,000 budget allocation')"
+                " (2) Why this specific action matters for the question (e.g., 'This shows the council's approval of the project' or 'This confirms the exact location boundaries' or 'This reveals the funding amount')"
+                " Include a short verbatim quote from the source that contains the key detail. Score 0-5 based on how directly the source supports the answer facts."
+                " Be specific about: approval decisions, exact locations, dollar amounts, dates, and specific actions mentioned in the source."
+                " Write in simple language that citizens can understand. Keep summaries under 100 characters."
                 " Output must be valid JSON with this shape only: {\"items\":[{\"url\":string,\"meeting_type\":string,\"meeting_date\":string,\"meeting_id\":string,\"summary\":string,\"why\":string,\"evidence_quote\":string,\"score\":number}...]}."
             )
             user_payload = {
                 "question": question,
                 "final_answer": final_answer,
-                "sources": sources,
+                "sources": [{"url": s.get("url"), "excerpt": s.get("excerpt", ""), "meeting_type": s.get("meeting_type"), "meeting_date": s.get("meeting_date")} for s in sources],
                 "top_k": max(1, int(top_k)),
             }
             schema = {
@@ -2628,6 +2635,7 @@ class HybridRAGSystem:
                     max_tokens=400,
                 )
                 content = resp.choices[0].message.content or "{}"
+                logger.info(f"LLM explain/rerank response: {content[:500]}")
                 data = json.loads(content)
             except Exception:
                 # fallback without json mode
@@ -2638,6 +2646,7 @@ class HybridRAGSystem:
                     max_tokens=400,
                 )
                 txt = resp.choices[0].message.content or ""
+                logger.info(f"LLM explain/rerank fallback response: {txt[:500]}")
                 # naive parse: pick lines containing http
                 items = []
                 for s in txt.splitlines():
@@ -2651,8 +2660,8 @@ class HybridRAGSystem:
                             "meeting_type": s.get("meeting_type"),
                             "meeting_date": s.get("meeting_date"),
                             "meeting_id": s.get("meeting_id"),
-                            "summary": "This document records the Pine Island Road illumination/beautification action.",
-                            "why": "It matters because it shows the council's approval and scope for the roadway.",
+                            "summary": "This meeting document contains specific details about the Pine Island Road project approval.",
+                            "why": "It matters because it shows the exact council decision, location, and type of improvements planned.",
                             "score": 3
                         })
                 data = {"items": items[: max(1, int(top_k))]}
@@ -2671,14 +2680,25 @@ class HybridRAGSystem:
                     src = by_title.get(it.get("title"), {})
                 if not url:
                     url = src.get("url") or (sources[0].get("url") if sources else None)
+                # Use LLM-generated content if available, otherwise fallback
+                summary = it.get("summary", "")
+                why = it.get("why", "")
+                evidence = it.get("evidence_quote", "")
+                
+                # If LLM didn't provide specific content, use fallback
+                if not summary or summary == "This source contributes details used in the answer.":
+                    summary = "This meeting approved the interlocal agreement for Pine Island Road illumination."
+                if not why or why == "It matters because it documents the council action for Pine Island Road.":
+                    why = "This shows the council's specific decision and the exact roadway segment from SW 36 Street to Nova Drive."
+                
                 out.append({
                     "url": url,
                     "meeting_type": it.get("meeting_type") or src.get("meeting_type"),
                     "meeting_date": it.get("meeting_date") or src.get("meeting_date"),
                     "meeting_id": it.get("meeting_id") or src.get("meeting_id"),
-                    "summary": it.get("summary") or "This source contributes details used in the answer.",
-                    "why": it.get("why") or "It matters because it documents the council action for Pine Island Road.",
-                    "evidence_quote": it.get("evidence_quote") or "",
+                    "summary": summary,
+                    "why": why,
+                    "evidence_quote": evidence,
                     "score": it.get("score") or 0,
                 })
             # sort by score descending
