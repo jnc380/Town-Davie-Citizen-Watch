@@ -8,12 +8,7 @@
   ],
   "functions": {
     "api/index.py": {
-      "includeFiles": [
-        "capstone_hierarchical_rag/**/*.py",
-        "capstone_hierarchical_rag/meeting_dates_minmax.txt",
-        "templates/**",
-        "static/**"
-      ]
+      "includeFiles": "capstone_hierarchical_rag/**"
     }
   }
 } 
