@@ -24,6 +24,12 @@
 !/capstone/youtube_processes/
 !/capstone/youtube_processes/youtube_hybrid_downloader.py
 
+# Allow new hierarchical server package
+!/capstone_hierarchical_rag/
+!/capstone_hierarchical_rag/milvus_neo4j_hybrid_system.py
+!/capstone_hierarchical_rag/__init__.py
+!/capstone_hierarchical_rag/meeting_dates_minmax.txt
+
 # Also allow root templates for Vercel packaging
 !/templates/
 !/templates/index.html
