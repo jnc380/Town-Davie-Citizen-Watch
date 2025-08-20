@@ -51,3 +51,28 @@ PYTHONPATH=capstone uvicorn api.index:app --host 0.0.0.0 --port 8000
 - No credentials in code or config
 - Use Vercel Env for secrets; rotate regularly
 - Rate limiting and basic validation are enabled 
+
+## Neo4j Concept Loader (additive, idempotent)
+
+Prepare concept taxonomy and weighted links for graph-guided search. This does not delete data.
+
+Prereqs:
+- Env: `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD` (and optional `NEO4J_DATABASE`)
+- Install: `pip install neo4j python-dotenv`
+
+Example (when ready to run):
+
+```bash
+python capstone/neo4j_migrations.py               # ensures constraints/indexes
+python capstone/neo4j_loader_concepts.py \
+  --ensure-schema \
+  --concepts capstone/concepts_seed.json \
+  --taxonomy capstone/concepts_taxonomy.json \
+  --agenda-links capstone/agenda_concept_links.tsv \
+  --segment-links capstone/segment_concept_links.tsv
+```
+
+Notes:
+- All writes use MERGE; safe to re-run.
+- Replace sample seed/link files with your real data before running.
+- Server-side Neo4j query integration will be enabled after you validate the load. 
