@@ -5,10 +5,5 @@
   ],
   "routes": [
     { "src": "/(.*)", "dest": "api/index.py" }
-  ],
-  "functions": {
-    "api/index.py": {
-      "includeFiles": "capstone_hierarchical_rag/**"
-    }
-  }
+  ]
 } 
