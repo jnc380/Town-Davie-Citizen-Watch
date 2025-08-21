@@ -66,8 +66,8 @@ static/
 templates/ 
 
 # allow project submission artifacts
-!/project submission/
-!/project submission/**
+!/project_submission/
+!/project_submission/**
 
 # allow additional hierarchical modules and docs (keep heavy data ignored)
 !/capstone_hierarchical_rag/**/*.py
