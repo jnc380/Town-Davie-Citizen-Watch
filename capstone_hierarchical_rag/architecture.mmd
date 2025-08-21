@@ -1,0 +1,43 @@
+flowchart LR
+  %% Architecture: Offline (batch) and Online (Vercel API) with 3-LLM flow
+
+  subgraph "Offline Pipeline (Batch)"
+    Y1["YouTube Hybrid Downloader\n`youtube_processes/youtube_hybrid_downloader.py`"] --> T1["Raw transcripts / audio"]
+    A1["Agenda Scraper\n`agenda_processes/agenda_scraper.py`"] --> A2["Structured agenda text"]
+
+    T1 --> S1["TranscriptSegmenter\n`youtube_agenda_alignment/transcript_segmenter.py`"]
+    A2 --> S2["Dynamic Agenda Analyzer\n`youtube_agenda_alignment/dynamic_agenda_analyzer.py`"]
+
+    S1 --> AL1["Enhanced Transcript Aligner\n`youtube_agenda_alignment/enhanced_transcript_aligner(_v2).py`"]
+    S2 --> AL1
+
+    AL1 --> C1["Chunking & Processing\n`chunk_generator.py`, `enhanced_data_processor.py`, `data_processor.py`"]
+
+    C1 --> E1["Embeddings (OpenAI)"]
+    E1 --> M[("Milvus/Zilliz\ncollection: `capstone_hybrid_rag`")]
+
+    C1 --> N1["Concept Extraction + Loader\n`cleanup_files/concept_extraction/*.py`\n`neo4j_*_loader*_concepts.py`"]
+    N1 --> G[("Neo4j Graph\n(Concepts, Agenda Items, Links)")]
+  end
+
+  subgraph "Online API (Vercel)"
+    AP["FastAPI App\n`milvus_neo4j_hybrid_system.py`\n(loaded by `api/index.py`)"]
+    Q["User Query"] --> AP
+
+    AP --> R0["Hybrid Retrieval\nDense + Sparse (Milvus) + Graph Hints (Neo4j)"]
+
+    R0 --> L1["LLM #1: Reranker\n`_rerank_with_gpt()`"]
+    L1 --> CTX["Top-K Context"]
+
+    Q --> L2["LLM #2: Answer from Context\n(uses concatenated context)"]
+    CTX --> L2
+
+    L2 --> L3["LLM #3: Source Justifications\n`_explain_and_rerank_sources()`"]
+    CTX --> L3
+
+    L3 --> RESP["API JSON Response\nanswer + citations (urls, why, evidence)"]
+  end
+
+  %% Data connections from stores to retrieval
+  M --- R0
+  G --- R0 
