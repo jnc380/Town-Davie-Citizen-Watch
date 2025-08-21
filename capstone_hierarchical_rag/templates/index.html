@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Town of Davie Town Council Meeting GPT</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .gradient-bg {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .chat-container {
+            height: 60vh;
+            overflow-y: auto;
+        }
+        .message {
+            animation: fadeIn 0.3s ease-in;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .disclaimer {
+            background: #fff7ed;
+            border-left: 4px solid #f59e0b;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <!-- Header -->
+    <header class="gradient-bg text-white shadow-lg">
+        <div class="container mx-auto px-6 py-4">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-4">
+                    <i class="fas fa-landmark text-3xl"></i>
+                    <div>
+                        <h1 class="text-2xl font-bold">Town of Davie Town Council Meeting GPT</h1>
+                        <p class="text-sm opacity-90">Ask questions about council meetings, agenda items, and decisions</p>
+                    </div>
+                </div>
+                <div class="text-right">
+                    <div class="text-sm opacity-90">Powered by AI</div>
+                    <div class="text-xs opacity-75">Hybrid RAG System</div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Persistent Disclaimer Banner -->
+    <div class="disclaimer mx-auto max-w-6xl mt-4 rounded bg-orange-50 text-orange-900 px-6 py-3 shadow">
+        <div class="flex items-start space-x-3">
+            <i class="fas fa-triangle-exclamation text-orange-500 mt-0.5"></i>
+            <p class="text-sm">
+                <strong>Disclaimer:</strong> This tool uses AI to help citizens explore public records. While it strives for accuracy, AI-generated responses may contain errors or omissions. Always verify information with official Town of Davie sources before making decisions. Use at your own discretion.
+            </p>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="container mx-auto px-6 py-8">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <!-- Chat Interface -->
+            <div class="lg:col-span-2">
+                <div class="bg-white rounded-lg shadow-lg overflow-hidden">
+                    <div class="bg-blue-600 text-white px-6 py-4">
+                        <h2 class="text-xl font-semibold">
+                            <i class="fas fa-comments mr-2"></i>
+                            Council Q&A Chat
+                        </h2>
+                        <p class="text-sm opacity-90 mt-1">Ask questions about town meetings, council decisions, budgets, and policies</p>
+                    </div>
+                    
+                    <!-- Chat Messages -->
+                    <div id="chat-messages" class="chat-container p-6 space-y-4">
+                        <div class="message bg-blue-50 border-l-4 border-blue-500 p-4 rounded">
+                            <div class="flex items-start space-x-3">
+                                <i class="fas fa-robot text-blue-600 mt-1"></i>
+                                <div class="flex-1">
+                                    <div class="font-semibold text-blue-800">Government Assistant</div>
+                                    <div class="text-gray-700 mt-1">
+                                        Welcome! I can help you find information about Davie town meetings, council decisions, budgets, and policies. 
+                                        Try asking questions like:
+                                        <ul class="list-disc list-inside mt-2 space-y-1 text-sm">
+                                            <li>"What was discussed about Pine Island Road beautification?"</li>
+                                            <li>"How did the budget change in 2024?"</li>
+                                            <li>"Which council members voted on the CRA extension?"</li>
+                                            <li>"What contracts were awarded to construction companies?"</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Input Form -->
+                    <div class="border-t border-gray-200 p-6">
+                        <form id="chat-form" class="flex space-x-4">
+                            <div class="flex-1">
+                                <input 
+                                    type="text" 
+                                    id="message-input" 
+                                    placeholder="Ask about town meetings, decisions, or policies..."
+                                    class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                    required
+                                >
+                            </div>
+                            <button 
+                                type="submit" 
+                                id="send-button"
+                                class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors"
+                            >
+                                <i class="fas fa-paper-plane mr-2"></i>
+                                Send
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sidebar -->
+            <div class="space-y-6">
+                <!-- System Status -->
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-4">
+                        <i class="fas fa-chart-line mr-2 text-green-600"></i>
+                        System Status
+                    </h3>
+                    <div id="system-stats" class="space-y-3">
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-600">Vector Database:</span>
+                            <span id="vector-status" class="text-green-600 font-semibold">Connected</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-600">Graph Database:</span>
+                            <span id="graph-status" class="text-green-600 font-semibold">Connected</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-600">Total Documents:</span>
+                            <span id="total-docs" class="font-semibold">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Quick Questions -->
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-4">
+                        <i class="fas fa-lightbulb mr-2 text-yellow-600"></i>
+                        Quick Questions
+                    </h3>
+                    <div class="space-y-2">
+                        <button class="quick-question w-full text-left p-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors text-sm">
+                            What was discussed about Pine Island Road?
+                        </button>
+                        <button class="quick-question w-full text-left p-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors text-sm">
+                            How did the budget change in 2024?
+                        </button>
+                        <button class="quick-question w-full text-left p-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors text-sm">
+                            Which contracts were awarded?
+                        </button>
+                        <button class="quick-question w-full text-left p-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors text-sm">
+                            What CRA decisions were made?
+                        </button>
+                    </div>
+                </div>
+
+                <!-- About -->
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-4">
+                        <i class="fas fa-info-circle mr-2 text-blue-600"></i>
+                        About This System
+                    </h3>
+                    <div class="text-sm text-gray-600 space-y-2">
+                        <p>This system uses advanced AI to search through:</p>
+                        <ul class="list-disc list-inside space-y-1">
+                            <li>Town council meeting transcripts</li>
+                            <li>Meeting agendas and minutes</li>
+                            <li>Council decisions and resolutions</li>
+                            <li>Budget and financial information</li>
+                        </ul>
+                        <p class="mt-3 pt-3 border-t border-gray-200">
+                            <strong>Data Sources:</strong> YouTube transcripts and official meeting agendas from the Town of Davie government.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-gray-800 text-white py-8 mt-12">
+        <div class="container mx-auto px-6">
+            <div class="text-center">
+                <p class="text-sm opacity-75">
+                    <i class="fas fa-shield-alt mr-2"></i>
+                    Government Transparency Initiative
+                </p>
+                <p class="text-xs opacity-50 mt-2">
+                    Powered by Hybrid RAG Technology | OpenAI + Milvus + Neo4j
+                </p>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Chat functionality
+        const chatMessages = document.getElementById('chat-messages');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+        const chatForm = document.getElementById('chat-form');
+        const quickQuestions = document.querySelectorAll('.quick-question');
+        // session id handling
+        let sessionId = localStorage.getItem('davie_session_id') || null;
+        function ensureSessionId(resp) {
+            const sid = resp.headers.get('X-Session-Id');
+            if (sid && sid !== sessionId) {
+                sessionId = sid;
+                localStorage.setItem('davie_session_id', sessionId);
+            }
+        }
+
+        // Load system stats
+        async function loadSystemStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+                
+                document.getElementById('vector-status').textContent = 
+                    stats.milvus && stats.milvus.entity_count ? 'Connected' : 'Disconnected';
+                document.getElementById('graph-status').textContent = 
+                    stats.neo4j && stats.neo4j.node_counts ? 'Connected' : 'Disconnected';
+                document.getElementById('total-docs').textContent = 
+                    stats.milvus && stats.milvus.entity_count ? stats.milvus.entity_count : 'Unknown';
+            } catch (error) {
+                console.error('Failed to load system stats:', error);
+            }
+        }
+
+        function addMessage(content, isUser = false, sourceCitations = []) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isUser ? 'bg-green-50 border-l-4 border-green-500' : 'bg-blue-50 border-l-4 border-blue-500'} p-4 rounded`;
+            
+            const icon = isUser ? 'fas fa-user' : 'fas fa-robot';
+            const iconColor = isUser ? 'text-green-600' : 'text-blue-600';
+            const title = isUser ? 'You' : 'Government Assistant';
+            const titleColor = isUser ? 'text-green-800' : 'text-blue-800';
+            
+            let sourcesHtml = '';
+            if (sourceCitations && sourceCitations.length > 0) {
+                sourcesHtml = `
+                    <div class="mt-4 pt-3 border-t border-gray-200">
+                        <div class="text-sm font-semibold text-gray-700 mb-3">
+                            <i class="fas fa-link mr-2"></i>Source Documents (${sourceCitations.length})
+                        </div>
+                        <div class="space-y-3">
+                            ${sourceCitations.map((source, index) => {
+                                const isYouTube = source.type === 'youtube_transcript';
+                                const icon = isYouTube ? 'fab fa-youtube text-red-600' : 'fas fa-file-alt text-blue-600';
+                                const badgeColor = isYouTube ? 'bg-red-100 text-red-800' : 'bg-blue-100 text-blue-800';
+                                const linkUrl = source.url || source.agenda_url;
+                                const label = isYouTube ? 'Watch' : 'Open';
+                                const summary = source.summary || source.context_note || '';
+                                const hasLink = !!(linkUrl && typeof linkUrl === 'string' && linkUrl.trim().length > 0);
+                                return `
+                                    <div class="bg-white border border-gray-200 rounded-lg p-3 hover:shadow-md transition-shadow">
+                                        <div class="flex items-start justify-between">
+                                            <div class="flex-1">
+                                                <div class="flex items-center space-x-2 mb-1">
+                                                    <i class="${icon}"></i>
+                                                    ${hasLink ? `<a href="${linkUrl}" target="_blank" rel="noopener noreferrer" class="text-sm font-medium text-blue-700 hover:underline">${source.title}</a>` : `<span class="text-sm font-medium text-gray-500">${source.title}</span>`}
+                                                    <span class="px-2 py-1 text-xs rounded-full ${badgeColor}">
+                                                        ${isYouTube ? 'Video' : 'Document'}
+                                                    </span>
+                                                </div>
+                                                <ul class="list-disc list-inside text-sm text-gray-700">
+                                                    <li>${summary || 'Relevant to the answer'}</li>
+                                                </ul>
+                                                ${isYouTube && source.timestamp ? `
+                                                    <div class="text-xs text-gray-500 mt-1">
+                                                        <i class="fas fa-clock mr-1"></i>
+                                                        ${source.timestamp} ${source.duration ? `(Duration: ${source.duration})` : ''}
+                                                    </div>
+                                                ` : ''}
+                                                ${source.meeting_date ? `
+                                                    <div class="text-xs text-gray-500 mt-1">
+                                                        <i class="fas fa-calendar mr-1"></i>
+                                                        ${source.meeting_date}
+                                                    </div>
+                                                ` : ''}
+                                            </div>
+                                            <div class="ml-3">
+                                                ${hasLink ? `
+                                                <a href="${linkUrl}" target="_blank" rel="noopener noreferrer" 
+                                                   class="inline-flex items-center px-3 py-1 text-xs font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors">
+                                                    <i class="fas fa-external-link-alt mr-1"></i>
+                                                    ${label}
+                                                </a>` : `
+                                                <button disabled 
+                                                   class="inline-flex items-center px-3 py-1 text-xs font-medium text-white bg-gray-400 rounded-md cursor-not-allowed">
+                                                    <i class="fas fa-ban mr-1"></i>
+                                                    Unavailable
+                                                </button>`}
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+            
+            messageDiv.innerHTML = `
+                <div class="flex items-start space-x-3">
+                    <i class="${icon} ${iconColor} mt-1"></i>
+                    <div class="flex-1">
+                        <div class="font-semibold ${titleColor}">${title}</div>
+                        <div class="text-gray-700 mt-1">${content}</div>
+                        ${sourcesHtml}
+                    </div>
+                </div>
+            `;
+            
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        // staged progress UI
+        function addProgress(text) {
+            const div = document.createElement('div');
+            div.className = 'message bg-yellow-50 border-l-4 border-yellow-500 p-4 rounded';
+            div.innerHTML = `
+                <div class="flex items-start space-x-3">
+                    <i class="fas fa-circle-notch fa-spin text-yellow-600 mt-1"></i>
+                    <div class="flex-1">
+                        <div class="font-semibold text-yellow-800">Working</div>
+                        <div class="text-gray-700 mt-1">${text}</div>
+                    </div>
+                </div>`;
+            chatMessages.appendChild(div);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+            return div;
+        }
+
+        async function sendMessage(message) {
+            addMessage(message, true);
+
+            // staged statuses
+            const s1 = addProgress('Thank you for your question. Retrieving relevant agenda items...');
+            await new Promise(r => setTimeout(r, 400));
+            const s2 = addProgress('Retrieving Town Council transcripts...');
+            await new Promise(r => setTimeout(r, 400));
+
+            let finalStage;
+            try {
+                const response = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: message, top_k: 10, session_id: sessionId })
+                });
+                ensureSessionId(response);
+                // enter final stage
+                finalStage = addProgress('Summarizing all relevant content...');
+                const data = await response.json();
+
+                // clear progress after a short, non-jumpy delay
+                await new Promise(r => setTimeout(r, 600));
+                [s1, s2, finalStage].forEach(el => el && el.remove());
+
+                addMessage(data.answer, false, data.source_citations || []);
+            } catch (err) {
+                console.error(err);
+                [s1, s2, finalStage].forEach(el => el && el.remove());
+                addMessage('Sorry, I encountered an error while processing your request. Please try again.', false);
+            }
+        }
+
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const message = messageInput.value.trim();
+            if (message) {
+                messageInput.value = '';
+                await sendMessage(message);
+            }
+        });
+
+        quickQuestions.forEach(button => {
+            button.addEventListener('click', async () => {
+                const question = button.textContent.trim();
+                messageInput.value = question;
+                await sendMessage(question);
+            });
+        });
+
+        document.addEventListener('DOMContentLoaded', loadSystemStats);
+    </script>
+</body>
+</html> 

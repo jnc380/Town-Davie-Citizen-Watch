@@ -64,3 +64,14 @@ week_3/
 week_4/
 static/
 templates/ 
+
+# allow project submission artifacts
+!/project_submission/
+!/project_submission/**
+
+# allow additional hierarchical modules and docs (keep heavy data ignored)
+!/capstone_hierarchical_rag/**/*.py
+!/capstone_hierarchical_rag/*.md
+!/capstone_hierarchical_rag/architecture.mmd
+!/capstone_hierarchical_rag/templates/
+!/capstone_hierarchical_rag/templates/** 
